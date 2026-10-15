@@ -1,0 +1,12 @@
+stress-ng: info:  [15419] setting to a 3 mins run per stressor
+stress-ng: info:  [15419] dispatching hogs: 1 hdd
+stress-ng: info:  [15419] note: 16 cpus have scaling governors set to powersave and this may impact performance; setting /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor to 'performance' may improve performance
+stress-ng: info:  [15420] hdd: using 256M file system space per stressor instance (total 256M of 81.29G available file system space)
+stress-ng: metrc: [15419] stressor       bogo ops real time  usr time  sys time   bogo ops/s     bogo ops/s
+stress-ng: metrc: [15419]                           (secs)    (secs)    (secs)   (real time) (usr+sys time)
+stress-ng: metrc: [15419] hdd             1549974    180.00     18.32     22.65      8610.94       37833.44
+stress-ng: info:  [15419] skipped: 0
+stress-ng: info:  [15419] passed: 1: hdd (1)
+stress-ng: info:  [15419] failed: 0
+stress-ng: info:  [15419] metrics untrustworthy: 0
+stress-ng: info:  [15419] successful run completed in 3 mins

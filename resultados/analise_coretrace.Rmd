@@ -1,0 +1,674 @@
+---
+title: "Análise exploratória das métricas do CoreTrace"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    self_contained: true
+    mathjax: null
+---
+
+## Objetivo
+
+Nesta análise, vamos comparar as métricas do CoreTrace em quatro cenários reais: básico, carga de CPU, carga de memória e carga de disco. Queremos observar quais métricas mudam, como elas se relacionam e o que acrescentam ao monitoramento.
+
+Os dados foram coletados em 15/10/2026 na mesma máquina Linux, com Ryzen 7 5800H, 16 CPUs lógicas e aproximadamente 7,65 GB de RAM. Cada coleta durou cinco minutos e gerou 299 leituras.
+## Como fizemos os testes
+
+| Cenário | Carga aplicada | Início da carga | Fim da carga |
+|---|---|---|---|
+| Básico | Sem carga programada | — | — |
+| CPU | 8 processos de CPU do stress-ng | 18:10:09 | 18:13:09 |
+| Memória | 1 processo usando 1 GiB de memória | 18:17:02 | 18:20:02 |
+| Disco | Leitura/escrita sequenciais, arquivo de trabalho de 256 MiB, opção direct | 18:23:45 | 18:26:45 |
+
+Cada carga durou aproximadamente três minutos. Os testes começaram cerca de um minuto depois da coleta e terminaram antes dela, deixando um trecho de recuperação. Usamos os horários registrados no terminal, e não presumimos que as cargas começaram exatamente no segundo 60.
+
+O stress-ng informou que os testes terminaram sem falhas e que o modo de energia era powersave. Mantivemos essa configuração. O teste de memória foi moderado, sem tentar esgotar a RAM. O arquivo de disco foi reutilizado e 256 MiB é o tamanho de trabalho, não o total de dados transferidos.
+
+Para comparar os cenários, vamos usar os cinco minutos do básico e somente os trechos de carga dos outros três. 
+Os gráficos temporais também mostram antes e depois. Há uma execução de cada cenário, então os resultados são exploratórios, não uma validação de todos os tipos de servidor de clientes.
+
+## Abrindo os CSVs
+
+Cada linha lê um arquivo gerado. Os arquivos precisam estar em `dados/brutos`, dentro deste projeto. Os campos vazios são lidos como `NA`, que significa que o valor é ausente.
+
+```{r abrir-csvs}
+basico = read.csv("dados/brutos/coretrace_basico_2026-10-15_18-00-40-992674.csv", na.strings = "", check.names = FALSE)
+teste_cpu = read.csv("dados/brutos/coretrace_cpu_2026-10-15_18-08-59-597886.csv", na.strings = "", check.names = FALSE)
+teste_memoria = read.csv("dados/brutos/coretrace_memoria_2026-10-15_18-15-55-034537.csv", na.strings = "", check.names = FALSE)
+teste_disco = read.csv("dados/brutos/coretrace_disco_2026-10-15_18-22-38-834950.csv", na.strings = "", check.names = FALSE)
+
+basico$cenario = "Básico"
+teste_cpu$cenario = "CPU"
+teste_memoria$cenario = "Memória"
+teste_disco$cenario = "Disco"
+
+basico$fase = "Sem carga"
+teste_cpu$fase = "Antes"
+teste_memoria$fase = "Antes"
+teste_disco$fase = "Antes"
+```
+
+Agora vamos transformar os horários em datas que o R consegue comparar. 
+`as.POSIXct` faz essa conversão.
+
+```{r marcar-fases}
+teste_cpu$horario = as.POSIXct(teste_cpu$TIMESTAMP, format = "%Y-%m-%dT%H:%M:%OS", tz = "America/Sao_Paulo")
+teste_memoria$horario = as.POSIXct(teste_memoria$TIMESTAMP, format = "%Y-%m-%dT%H:%M:%OS", tz = "America/Sao_Paulo")
+teste_disco$horario = as.POSIXct(teste_disco$TIMESTAMP, format = "%Y-%m-%dT%H:%M:%OS", tz = "America/Sao_Paulo")
+basico$horario = as.POSIXct(basico$TIMESTAMP, format = "%Y-%m-%dT%H:%M:%OS", tz = "America/Sao_Paulo")
+
+inicio_cpu = as.POSIXct("2026-10-15 18:10:09", tz = "America/Sao_Paulo")
+fim_cpu = as.POSIXct("2026-10-15 18:13:09", tz = "America/Sao_Paulo")
+inicio_memoria = as.POSIXct("2026-10-15 18:17:02", tz = "America/Sao_Paulo")
+fim_memoria = as.POSIXct("2026-10-15 18:20:02", tz = "America/Sao_Paulo")
+inicio_disco = as.POSIXct("2026-10-15 18:23:45", tz = "America/Sao_Paulo")
+fim_disco = as.POSIXct("2026-10-15 18:26:45", tz = "America/Sao_Paulo")
+
+teste_cpu$fase[teste_cpu$horario >= inicio_cpu & teste_cpu$horario < fim_cpu] = "Durante"
+teste_cpu$fase[teste_cpu$horario >= fim_cpu] = "Depois"
+teste_memoria$fase[teste_memoria$horario >= inicio_memoria & teste_memoria$horario < fim_memoria] = "Durante"
+teste_memoria$fase[teste_memoria$horario >= fim_memoria] = "Depois"
+teste_disco$fase[teste_disco$horario >= inicio_disco & teste_disco$horario < fim_disco] = "Durante"
+teste_disco$fase[teste_disco$horario >= fim_disco] = "Depois"
+
+dados = rbind(basico, teste_cpu, teste_memoria, teste_disco)
+dados$cenario = factor(dados$cenario, levels = c("Básico", "CPU", "Memória", "Disco"))
+dados$minuto = dados$TEMPO_SEGUNDOS / 60
+
+knitr::kable(table(dados$cenario, dados$fase))
+```
+
+`rbind` junta as linhas dos quatro arquivos. `factor` mantém os cenários na ordem que escolhemos. A fase usa o horário registrado de cada rodada.
+
+## Preparando as métricas
+
+Vamos analisar CPU, RAM, memória disponível, carga média, atividade e tempo de I/O, fila, espera por I/O e swap. O dispositivo físico analisado é `nvme0n1`. O volume usado na análise de espaço é `/home`, onde ficou a pasta do teste de disco. Os números das colunas foram conferidos nos quatro CSVs.
+
+Leitura e escrita já chegam em bytes/s. Dividiremos por 1.000.000 para mostrar MB/s. RAM e espaço já chegam em GB. Tempos de I/O e fila já foram calculados na coleta.
+
+```{r preparar}
+print(unique(dados$disco_io_0_dispositivo))
+print(unique(dados$disco_volume_2_montagem))
+
+dados$cpu = dados$cpu_percent
+dados$ram = dados$ram_percent
+dados$memoria_disponivel = dados$ram_available
+dados$carga_5 = dados$load_avg_5
+dados$leitura = dados$disco_io_0_read_bytes / 1000000
+dados$escrita = dados$disco_io_0_write_bytes / 1000000
+dados$iops_leitura = dados$disco_io_0_read_count
+dados$iops_escrita = dados$disco_io_0_write_count
+dados$fila = dados$disco_io_0_queue
+dados$tempo_leitura = dados$disco_io_0_read_time_ms
+dados$tempo_escrita = dados$disco_io_0_write_time_ms
+dados$espera_io = dados$cpu_iowait
+dados$swap_entrada = dados$swap_sin / 1000000
+dados$swap_saida = dados$swap_sout / 1000000
+dados$espaco_usado = dados$disco_volume_2_used
+```
+
+Usamos somente valores que tem status `ok`. Status que sejam `aquecendo`, `sem_operacoes` ou `erro_fonte` continuam nos CSVs, mas os valores correspondentes ficam ausentes na análise. Zero válido continua sendo zero. `is.finite` verifica se o valor é um número finito, excluindo infinitos.
+
+```{r validar}
+invalida = is.na(dados$cpu_percent_status) | dados$cpu_percent_status != "ok" | !is.finite(dados$cpu) | dados$cpu < 0
+invalida = invalida | dados$cpu > 100
+dados$cpu[invalida] = NA
+
+invalida = is.na(dados$ram_percent_status) | dados$ram_percent_status != "ok" | !is.finite(dados$ram) | dados$ram < 0
+invalida = invalida | dados$ram > 100
+dados$ram[invalida] = NA
+
+invalida = is.na(dados$ram_available_status) | dados$ram_available_status != "ok" | !is.finite(dados$memoria_disponivel) | dados$memoria_disponivel < 0
+dados$memoria_disponivel[invalida] = NA
+
+invalida = is.na(dados$load_avg_5_status) | dados$load_avg_5_status != "ok" | !is.finite(dados$carga_5) | dados$carga_5 < 0
+dados$carga_5[invalida] = NA
+
+invalida = is.na(dados$disco_io_0_read_bytes_status) | dados$disco_io_0_read_bytes_status != "ok" | !is.finite(dados$leitura) | dados$leitura < 0
+dados$leitura[invalida] = NA
+
+invalida = is.na(dados$disco_io_0_write_bytes_status) | dados$disco_io_0_write_bytes_status != "ok" | !is.finite(dados$escrita) | dados$escrita < 0
+dados$escrita[invalida] = NA
+
+invalida = is.na(dados$disco_io_0_read_count_status) | dados$disco_io_0_read_count_status != "ok" | !is.finite(dados$iops_leitura) | dados$iops_leitura < 0
+dados$iops_leitura[invalida] = NA
+
+invalida = is.na(dados$disco_io_0_write_count_status) | dados$disco_io_0_write_count_status != "ok" | !is.finite(dados$iops_escrita) | dados$iops_escrita < 0
+dados$iops_escrita[invalida] = NA
+
+invalida = is.na(dados$disco_io_0_queue_status) | dados$disco_io_0_queue_status != "ok" | !is.finite(dados$fila) | dados$fila < 0
+dados$fila[invalida] = NA
+
+invalida = is.na(dados$disco_io_0_read_time_ms_status) | dados$disco_io_0_read_time_ms_status != "ok" | !is.finite(dados$tempo_leitura) | dados$tempo_leitura < 0
+dados$tempo_leitura[invalida] = NA
+
+invalida = is.na(dados$disco_io_0_write_time_ms_status) | dados$disco_io_0_write_time_ms_status != "ok" | !is.finite(dados$tempo_escrita) | dados$tempo_escrita < 0
+dados$tempo_escrita[invalida] = NA
+
+invalida = is.na(dados$cpu_iowait_status) | dados$cpu_iowait_status != "ok" | !is.finite(dados$espera_io) | dados$espera_io < 0
+invalida = invalida | dados$espera_io > 100
+dados$espera_io[invalida] = NA
+
+invalida = is.na(dados$swap_sin_status) | dados$swap_sin_status != "ok" | !is.finite(dados$swap_entrada) | dados$swap_entrada < 0
+dados$swap_entrada[invalida] = NA
+
+invalida = is.na(dados$swap_sout_status) | dados$swap_sout_status != "ok" | !is.finite(dados$swap_saida) | dados$swap_saida < 0
+dados$swap_saida[invalida] = NA
+
+invalida = is.na(dados$disco_volume_2_used_status) | dados$disco_volume_2_used_status != "ok" | !is.finite(dados$espaco_usado) | dados$espaco_usado < 0
+dados$espaco_usado[invalida] = NA
+
+```
+
+A primeira leitura de costuma ficar como "aquecendo". Tempos médios de I/O ficam ausentes quando não teve operações pra calcular a média. Essas lacunas não indicam que teve alguma falha.
+
+```{r qualidade}
+knitr::kable(table(dados$cenario, dados$cpu_percent_status))
+knitr::kable(table(dados$cenario, dados$disco_io_0_read_time_ms_status))
+```
+
+## Estatística descritiva por cenário
+
+A comparação abaixo usa todo o básico e os trechos de carga dos outros cenários. As leituras antes e depois continuam disponíveis para os gráficos e a avaliação de recuperação.
+
+`tapply` calcula uma estatística separada por cenário. `na.rm = TRUE` exclui os valores ausentes do cálculo. A coluna de leituras válidas mostra quantas observações sustentam cada resultado. Os quartis dividem a distribuição, e o percentil 95 é o valor abaixo do qual ficam aproximadamente 95% das leituras.
+
+```{r selecionar-comparacao}
+comparacao = dados[dados$cenario == "Básico" | dados$fase == "Durante", ]
+knitr::kable(table(comparacao$cenario))
+```
+
+### Uso de CPU (%)
+
+```{r resumo-cpu}
+resumo_cpu = data.frame(
+  validas = tapply(!is.na(comparacao$cpu), comparacao$cenario, sum),
+  media = tapply(comparacao$cpu, comparacao$cenario, mean, na.rm = TRUE),
+  mediana = tapply(comparacao$cpu, comparacao$cenario, median, na.rm = TRUE),
+  minimo = tapply(comparacao$cpu, comparacao$cenario, min, na.rm = TRUE),
+  maximo = tapply(comparacao$cpu, comparacao$cenario, max, na.rm = TRUE),
+  quartil_1 = tapply(comparacao$cpu, comparacao$cenario, quantile, probs = 0.25, na.rm = TRUE),
+  quartil_3 = tapply(comparacao$cpu, comparacao$cenario, quantile, probs = 0.75, na.rm = TRUE),
+  desvio_padrao = tapply(comparacao$cpu, comparacao$cenario, sd, na.rm = TRUE),
+  percentil_95 = tapply(comparacao$cpu, comparacao$cenario, quantile, probs = 0.95, na.rm = TRUE)
+)
+knitr::kable(resumo_cpu, digits = 3)
+```
+
+### Uso de RAM (%)
+
+```{r resumo-ram}
+resumo_ram = data.frame(
+  validas = tapply(!is.na(comparacao$ram), comparacao$cenario, sum),
+  media = tapply(comparacao$ram, comparacao$cenario, mean, na.rm = TRUE),
+  mediana = tapply(comparacao$ram, comparacao$cenario, median, na.rm = TRUE),
+  minimo = tapply(comparacao$ram, comparacao$cenario, min, na.rm = TRUE),
+  maximo = tapply(comparacao$ram, comparacao$cenario, max, na.rm = TRUE),
+  quartil_1 = tapply(comparacao$ram, comparacao$cenario, quantile, probs = 0.25, na.rm = TRUE),
+  quartil_3 = tapply(comparacao$ram, comparacao$cenario, quantile, probs = 0.75, na.rm = TRUE),
+  desvio_padrao = tapply(comparacao$ram, comparacao$cenario, sd, na.rm = TRUE),
+  percentil_95 = tapply(comparacao$ram, comparacao$cenario, quantile, probs = 0.95, na.rm = TRUE)
+)
+knitr::kable(resumo_ram, digits = 3)
+```
+
+### Memória disponível (GB)
+
+```{r resumo-memoria_disponivel}
+resumo_memoria_disponivel = data.frame(
+  validas = tapply(!is.na(comparacao$memoria_disponivel), comparacao$cenario, sum),
+  media = tapply(comparacao$memoria_disponivel, comparacao$cenario, mean, na.rm = TRUE),
+  mediana = tapply(comparacao$memoria_disponivel, comparacao$cenario, median, na.rm = TRUE),
+  minimo = tapply(comparacao$memoria_disponivel, comparacao$cenario, min, na.rm = TRUE),
+  maximo = tapply(comparacao$memoria_disponivel, comparacao$cenario, max, na.rm = TRUE),
+  quartil_1 = tapply(comparacao$memoria_disponivel, comparacao$cenario, quantile, probs = 0.25, na.rm = TRUE),
+  quartil_3 = tapply(comparacao$memoria_disponivel, comparacao$cenario, quantile, probs = 0.75, na.rm = TRUE),
+  desvio_padrao = tapply(comparacao$memoria_disponivel, comparacao$cenario, sd, na.rm = TRUE),
+  percentil_95 = tapply(comparacao$memoria_disponivel, comparacao$cenario, quantile, probs = 0.95, na.rm = TRUE)
+)
+knitr::kable(resumo_memoria_disponivel, digits = 3)
+```
+
+### Carga média de 5 minutos
+
+```{r resumo-carga_5}
+resumo_carga_5 = data.frame(
+  validas = tapply(!is.na(comparacao$carga_5), comparacao$cenario, sum),
+  media = tapply(comparacao$carga_5, comparacao$cenario, mean, na.rm = TRUE),
+  mediana = tapply(comparacao$carga_5, comparacao$cenario, median, na.rm = TRUE),
+  minimo = tapply(comparacao$carga_5, comparacao$cenario, min, na.rm = TRUE),
+  maximo = tapply(comparacao$carga_5, comparacao$cenario, max, na.rm = TRUE),
+  quartil_1 = tapply(comparacao$carga_5, comparacao$cenario, quantile, probs = 0.25, na.rm = TRUE),
+  quartil_3 = tapply(comparacao$carga_5, comparacao$cenario, quantile, probs = 0.75, na.rm = TRUE),
+  desvio_padrao = tapply(comparacao$carga_5, comparacao$cenario, sd, na.rm = TRUE),
+  percentil_95 = tapply(comparacao$carga_5, comparacao$cenario, quantile, probs = 0.95, na.rm = TRUE)
+)
+knitr::kable(resumo_carga_5, digits = 3)
+```
+
+### Leitura de disco (MB/s)
+
+```{r resumo-leitura}
+resumo_leitura = data.frame(
+  validas = tapply(!is.na(comparacao$leitura), comparacao$cenario, sum),
+  media = tapply(comparacao$leitura, comparacao$cenario, mean, na.rm = TRUE),
+  mediana = tapply(comparacao$leitura, comparacao$cenario, median, na.rm = TRUE),
+  minimo = tapply(comparacao$leitura, comparacao$cenario, min, na.rm = TRUE),
+  maximo = tapply(comparacao$leitura, comparacao$cenario, max, na.rm = TRUE),
+  quartil_1 = tapply(comparacao$leitura, comparacao$cenario, quantile, probs = 0.25, na.rm = TRUE),
+  quartil_3 = tapply(comparacao$leitura, comparacao$cenario, quantile, probs = 0.75, na.rm = TRUE),
+  desvio_padrao = tapply(comparacao$leitura, comparacao$cenario, sd, na.rm = TRUE),
+  percentil_95 = tapply(comparacao$leitura, comparacao$cenario, quantile, probs = 0.95, na.rm = TRUE)
+)
+knitr::kable(resumo_leitura, digits = 3)
+```
+
+### Escrita de disco (MB/s)
+
+```{r resumo-escrita}
+resumo_escrita = data.frame(
+  validas = tapply(!is.na(comparacao$escrita), comparacao$cenario, sum),
+  media = tapply(comparacao$escrita, comparacao$cenario, mean, na.rm = TRUE),
+  mediana = tapply(comparacao$escrita, comparacao$cenario, median, na.rm = TRUE),
+  minimo = tapply(comparacao$escrita, comparacao$cenario, min, na.rm = TRUE),
+  maximo = tapply(comparacao$escrita, comparacao$cenario, max, na.rm = TRUE),
+  quartil_1 = tapply(comparacao$escrita, comparacao$cenario, quantile, probs = 0.25, na.rm = TRUE),
+  quartil_3 = tapply(comparacao$escrita, comparacao$cenario, quantile, probs = 0.75, na.rm = TRUE),
+  desvio_padrao = tapply(comparacao$escrita, comparacao$cenario, sd, na.rm = TRUE),
+  percentil_95 = tapply(comparacao$escrita, comparacao$cenario, quantile, probs = 0.95, na.rm = TRUE)
+)
+knitr::kable(resumo_escrita, digits = 3)
+```
+
+### Operações de leitura (IOPS)
+
+```{r resumo-iops_leitura}
+resumo_iops_leitura = data.frame(
+  validas = tapply(!is.na(comparacao$iops_leitura), comparacao$cenario, sum),
+  media = tapply(comparacao$iops_leitura, comparacao$cenario, mean, na.rm = TRUE),
+  mediana = tapply(comparacao$iops_leitura, comparacao$cenario, median, na.rm = TRUE),
+  minimo = tapply(comparacao$iops_leitura, comparacao$cenario, min, na.rm = TRUE),
+  maximo = tapply(comparacao$iops_leitura, comparacao$cenario, max, na.rm = TRUE),
+  quartil_1 = tapply(comparacao$iops_leitura, comparacao$cenario, quantile, probs = 0.25, na.rm = TRUE),
+  quartil_3 = tapply(comparacao$iops_leitura, comparacao$cenario, quantile, probs = 0.75, na.rm = TRUE),
+  desvio_padrao = tapply(comparacao$iops_leitura, comparacao$cenario, sd, na.rm = TRUE),
+  percentil_95 = tapply(comparacao$iops_leitura, comparacao$cenario, quantile, probs = 0.95, na.rm = TRUE)
+)
+knitr::kable(resumo_iops_leitura, digits = 3)
+```
+
+### Operações de escrita (IOPS)
+
+```{r resumo-iops_escrita}
+resumo_iops_escrita = data.frame(
+  validas = tapply(!is.na(comparacao$iops_escrita), comparacao$cenario, sum),
+  media = tapply(comparacao$iops_escrita, comparacao$cenario, mean, na.rm = TRUE),
+  mediana = tapply(comparacao$iops_escrita, comparacao$cenario, median, na.rm = TRUE),
+  minimo = tapply(comparacao$iops_escrita, comparacao$cenario, min, na.rm = TRUE),
+  maximo = tapply(comparacao$iops_escrita, comparacao$cenario, max, na.rm = TRUE),
+  quartil_1 = tapply(comparacao$iops_escrita, comparacao$cenario, quantile, probs = 0.25, na.rm = TRUE),
+  quartil_3 = tapply(comparacao$iops_escrita, comparacao$cenario, quantile, probs = 0.75, na.rm = TRUE),
+  desvio_padrao = tapply(comparacao$iops_escrita, comparacao$cenario, sd, na.rm = TRUE),
+  percentil_95 = tapply(comparacao$iops_escrita, comparacao$cenario, quantile, probs = 0.95, na.rm = TRUE)
+)
+knitr::kable(resumo_iops_escrita, digits = 3)
+```
+
+### Fila média de I/O (operações)
+
+```{r resumo-fila}
+resumo_fila = data.frame(
+  validas = tapply(!is.na(comparacao$fila), comparacao$cenario, sum),
+  media = tapply(comparacao$fila, comparacao$cenario, mean, na.rm = TRUE),
+  mediana = tapply(comparacao$fila, comparacao$cenario, median, na.rm = TRUE),
+  minimo = tapply(comparacao$fila, comparacao$cenario, min, na.rm = TRUE),
+  maximo = tapply(comparacao$fila, comparacao$cenario, max, na.rm = TRUE),
+  quartil_1 = tapply(comparacao$fila, comparacao$cenario, quantile, probs = 0.25, na.rm = TRUE),
+  quartil_3 = tapply(comparacao$fila, comparacao$cenario, quantile, probs = 0.75, na.rm = TRUE),
+  desvio_padrao = tapply(comparacao$fila, comparacao$cenario, sd, na.rm = TRUE),
+  percentil_95 = tapply(comparacao$fila, comparacao$cenario, quantile, probs = 0.95, na.rm = TRUE)
+)
+knitr::kable(resumo_fila, digits = 3)
+```
+
+### Tempo médio estimado de leitura (ms)
+
+```{r resumo-tempo_leitura}
+resumo_tempo_leitura = data.frame(
+  validas = tapply(!is.na(comparacao$tempo_leitura), comparacao$cenario, sum),
+  media = tapply(comparacao$tempo_leitura, comparacao$cenario, mean, na.rm = TRUE),
+  mediana = tapply(comparacao$tempo_leitura, comparacao$cenario, median, na.rm = TRUE),
+  minimo = tapply(comparacao$tempo_leitura, comparacao$cenario, min, na.rm = TRUE),
+  maximo = tapply(comparacao$tempo_leitura, comparacao$cenario, max, na.rm = TRUE),
+  quartil_1 = tapply(comparacao$tempo_leitura, comparacao$cenario, quantile, probs = 0.25, na.rm = TRUE),
+  quartil_3 = tapply(comparacao$tempo_leitura, comparacao$cenario, quantile, probs = 0.75, na.rm = TRUE),
+  desvio_padrao = tapply(comparacao$tempo_leitura, comparacao$cenario, sd, na.rm = TRUE),
+  percentil_95 = tapply(comparacao$tempo_leitura, comparacao$cenario, quantile, probs = 0.95, na.rm = TRUE)
+)
+knitr::kable(resumo_tempo_leitura, digits = 3)
+```
+
+### Tempo médio estimado de escrita (ms)
+
+```{r resumo-tempo_escrita}
+resumo_tempo_escrita = data.frame(
+  validas = tapply(!is.na(comparacao$tempo_escrita), comparacao$cenario, sum),
+  media = tapply(comparacao$tempo_escrita, comparacao$cenario, mean, na.rm = TRUE),
+  mediana = tapply(comparacao$tempo_escrita, comparacao$cenario, median, na.rm = TRUE),
+  minimo = tapply(comparacao$tempo_escrita, comparacao$cenario, min, na.rm = TRUE),
+  maximo = tapply(comparacao$tempo_escrita, comparacao$cenario, max, na.rm = TRUE),
+  quartil_1 = tapply(comparacao$tempo_escrita, comparacao$cenario, quantile, probs = 0.25, na.rm = TRUE),
+  quartil_3 = tapply(comparacao$tempo_escrita, comparacao$cenario, quantile, probs = 0.75, na.rm = TRUE),
+  desvio_padrao = tapply(comparacao$tempo_escrita, comparacao$cenario, sd, na.rm = TRUE),
+  percentil_95 = tapply(comparacao$tempo_escrita, comparacao$cenario, quantile, probs = 0.95, na.rm = TRUE)
+)
+knitr::kable(resumo_tempo_escrita, digits = 3)
+```
+
+### Espera por I/O (%)
+
+```{r resumo-espera_io}
+resumo_espera_io = data.frame(
+  validas = tapply(!is.na(comparacao$espera_io), comparacao$cenario, sum),
+  media = tapply(comparacao$espera_io, comparacao$cenario, mean, na.rm = TRUE),
+  mediana = tapply(comparacao$espera_io, comparacao$cenario, median, na.rm = TRUE),
+  minimo = tapply(comparacao$espera_io, comparacao$cenario, min, na.rm = TRUE),
+  maximo = tapply(comparacao$espera_io, comparacao$cenario, max, na.rm = TRUE),
+  quartil_1 = tapply(comparacao$espera_io, comparacao$cenario, quantile, probs = 0.25, na.rm = TRUE),
+  quartil_3 = tapply(comparacao$espera_io, comparacao$cenario, quantile, probs = 0.75, na.rm = TRUE),
+  desvio_padrao = tapply(comparacao$espera_io, comparacao$cenario, sd, na.rm = TRUE),
+  percentil_95 = tapply(comparacao$espera_io, comparacao$cenario, quantile, probs = 0.95, na.rm = TRUE)
+)
+knitr::kable(resumo_espera_io, digits = 3)
+```
+
+### Entrada de swap (MB/s)
+
+```{r resumo-swap_entrada}
+resumo_swap_entrada = data.frame(
+  validas = tapply(!is.na(comparacao$swap_entrada), comparacao$cenario, sum),
+  media = tapply(comparacao$swap_entrada, comparacao$cenario, mean, na.rm = TRUE),
+  mediana = tapply(comparacao$swap_entrada, comparacao$cenario, median, na.rm = TRUE),
+  minimo = tapply(comparacao$swap_entrada, comparacao$cenario, min, na.rm = TRUE),
+  maximo = tapply(comparacao$swap_entrada, comparacao$cenario, max, na.rm = TRUE),
+  quartil_1 = tapply(comparacao$swap_entrada, comparacao$cenario, quantile, probs = 0.25, na.rm = TRUE),
+  quartil_3 = tapply(comparacao$swap_entrada, comparacao$cenario, quantile, probs = 0.75, na.rm = TRUE),
+  desvio_padrao = tapply(comparacao$swap_entrada, comparacao$cenario, sd, na.rm = TRUE),
+  percentil_95 = tapply(comparacao$swap_entrada, comparacao$cenario, quantile, probs = 0.95, na.rm = TRUE)
+)
+knitr::kable(resumo_swap_entrada, digits = 3)
+```
+
+### Saída de swap (MB/s)
+
+```{r resumo-swap_saida}
+resumo_swap_saida = data.frame(
+  validas = tapply(!is.na(comparacao$swap_saida), comparacao$cenario, sum),
+  media = tapply(comparacao$swap_saida, comparacao$cenario, mean, na.rm = TRUE),
+  mediana = tapply(comparacao$swap_saida, comparacao$cenario, median, na.rm = TRUE),
+  minimo = tapply(comparacao$swap_saida, comparacao$cenario, min, na.rm = TRUE),
+  maximo = tapply(comparacao$swap_saida, comparacao$cenario, max, na.rm = TRUE),
+  quartil_1 = tapply(comparacao$swap_saida, comparacao$cenario, quantile, probs = 0.25, na.rm = TRUE),
+  quartil_3 = tapply(comparacao$swap_saida, comparacao$cenario, quantile, probs = 0.75, na.rm = TRUE),
+  desvio_padrao = tapply(comparacao$swap_saida, comparacao$cenario, sd, na.rm = TRUE),
+  percentil_95 = tapply(comparacao$swap_saida, comparacao$cenario, quantile, probs = 0.95, na.rm = TRUE)
+)
+knitr::kable(resumo_swap_saida, digits = 3)
+```
+
+### Espaço ocupado em /home (GB)
+
+```{r resumo-espaco_usado}
+resumo_espaco_usado = data.frame(
+  validas = tapply(!is.na(comparacao$espaco_usado), comparacao$cenario, sum),
+  media = tapply(comparacao$espaco_usado, comparacao$cenario, mean, na.rm = TRUE),
+  mediana = tapply(comparacao$espaco_usado, comparacao$cenario, median, na.rm = TRUE),
+  minimo = tapply(comparacao$espaco_usado, comparacao$cenario, min, na.rm = TRUE),
+  maximo = tapply(comparacao$espaco_usado, comparacao$cenario, max, na.rm = TRUE),
+  quartil_1 = tapply(comparacao$espaco_usado, comparacao$cenario, quantile, probs = 0.25, na.rm = TRUE),
+  quartil_3 = tapply(comparacao$espaco_usado, comparacao$cenario, quantile, probs = 0.75, na.rm = TRUE),
+  desvio_padrao = tapply(comparacao$espaco_usado, comparacao$cenario, sd, na.rm = TRUE),
+  percentil_95 = tapply(comparacao$espaco_usado, comparacao$cenario, quantile, probs = 0.95, na.rm = TRUE)
+)
+knitr::kable(resumo_espaco_usado, digits = 3)
+```
+
+Essas tabelas descrevem as leituras que foram válidas. Pra tempos de I/O, a média considera somente intervalos com operações.
+
+A RAM variou bastante nos trechos antes das cargas. Isso mostra que o estado inicial não ficou idêntico entre os arquivos. Por isso também vamos comparamos as fases dentro de cada teste, sem atribuir toda diferença entre arquivos só pela carga aplicada.
+
+```{r fases}
+knitr::kable(tapply(dados$cpu, list(dados$cenario, dados$fase), mean, na.rm = TRUE), digits = 2)
+knitr::kable(tapply(dados$ram, list(dados$cenario, dados$fase), mean, na.rm = TRUE), digits = 2)
+```
+
+## Distribuições
+
+Vamos observar os histogramas da CPU e comparar os componentes por boxplots. Todos usam as leituras válidas selecionadas para comparação. Os intervalos de análise têm durações diferentes. Nos histogramas, usamos densidade para comparar o formato
+
+```{r histogramas, fig.width=9, fig.height=7}
+basico = dados[dados$cenario == "Básico", ]
+estresse_cpu = comparacao[comparacao$cenario == "CPU", ]
+estresse_memoria = comparacao[comparacao$cenario == "Memória", ]
+estresse_disco = comparacao[comparacao$cenario == "Disco", ]
+
+par(mfrow = c(2, 2))
+hist(basico$cpu, breaks = seq(0, 100, 5), freq = FALSE, col = "lightblue", main = "Básico", xlab = "CPU (%)", ylab = "Densidade")
+hist(estresse_cpu$cpu, breaks = seq(0, 100, 5), freq = FALSE, col = "lightblue", main = "Carga de CPU", xlab = "CPU (%)", ylab = "Densidade")
+hist(estresse_memoria$cpu, breaks = seq(0, 100, 5), freq = FALSE, col = "lightblue", main = "Carga de memória", xlab = "CPU (%)", ylab = "Densidade")
+hist(estresse_disco$cpu, breaks = seq(0, 100, 5), freq = FALSE, col = "lightblue", main = "Carga de disco", xlab = "CPU (%)", ylab = "Densidade")
+par(mfrow = c(1, 1))
+```
+
+```{r boxplots, fig.width=9, fig.height=7}
+par(mfrow = c(2, 2))
+boxplot(cpu ~ cenario, data = comparacao, col = "lightblue", main = "CPU", ylab = "Uso (%)")
+boxplot(ram ~ cenario, data = comparacao, col = "lightgreen", main = "RAM", ylab = "Uso (%)")
+boxplot(leitura ~ cenario, data = comparacao, col = "lightblue", main = "Leitura de disco", ylab = "MB/s")
+boxplot(fila ~ cenario, data = comparacao, col = "lightyellow", main = "Fila média", ylab = "Operações")
+par(mfrow = c(1, 1))
+```
+
+## CPU ao longo do tempo
+
+Cada painel abaixo representa uma coleta completa de cinco minutos. As linhas vermelhas delimitam os horários registrados de início e fim da carga. O básico não teve carga programada. Os períodos não são uma sequência contínua: houve intervalos sem coleta entre os arquivos.
+
+```{r cpu-tempo, fig.width=10, fig.height=7}
+teste_cpu = dados[dados$cenario == "CPU", ]
+teste_memoria = dados[dados$cenario == "Memória", ]
+teste_disco = dados[dados$cenario == "Disco", ]
+
+inicio_cpu_min = as.numeric(difftime(inicio_cpu, teste_cpu$horario[1], units = "mins"))
+fim_cpu_min = as.numeric(difftime(fim_cpu, teste_cpu$horario[1], units = "mins"))
+inicio_memoria_min = as.numeric(difftime(inicio_memoria, teste_memoria$horario[1], units = "mins"))
+fim_memoria_min = as.numeric(difftime(fim_memoria, teste_memoria$horario[1], units = "mins"))
+inicio_disco_min = as.numeric(difftime(inicio_disco, teste_disco$horario[1], units = "mins"))
+fim_disco_min = as.numeric(difftime(fim_disco, teste_disco$horario[1], units = "mins"))
+
+par(mfrow = c(2, 2))
+plot(basico$minuto, basico$cpu, type = "l", col = "blue", ylim = c(0, 100), main = "Básico", xlab = "Minutos da coleta", ylab = "CPU (%)")
+plot(teste_cpu$minuto, teste_cpu$cpu, type = "l", col = "blue", ylim = c(0, 100), main = "Carga de CPU", xlab = "Minutos da coleta", ylab = "CPU (%)")
+abline(v = c(inicio_cpu_min, fim_cpu_min), col = "red", lty = 2)
+plot(teste_memoria$minuto, teste_memoria$cpu, type = "l", col = "blue", ylim = c(0, 100), main = "Carga de memória", xlab = "Minutos da coleta", ylab = "CPU (%)")
+abline(v = c(inicio_memoria_min, fim_memoria_min), col = "red", lty = 2)
+plot(teste_disco$minuto, teste_disco$cpu, type = "l", col = "blue", ylim = c(0, 100), main = "Carga de disco", xlab = "Minutos da coleta", ylab = "CPU (%)")
+abline(v = c(inicio_disco_min, fim_disco_min), col = "red", lty = 2)
+par(mfrow = c(1, 1))
+```
+
+O uso médio de CPU passou de aproximadamente 1,18% antes para 50,36% durante o teste, voltando para 0,82% depois. Oito processos em uma máquina com 16 CPUs lógicas não precisavam ocupar 100% do total para produzir uma resposta clara.
+
+## Memória disponível e swap
+
+Vamos observar o arquivo do teste de memória inteiro. Entrada de swap significa dados voltando para RAM; saída significa dados indo da RAM para a swap.
+
+```{r memoria-tempo, fig.width=10, fig.height=8}
+par(mfrow = c(3, 1))
+plot(teste_memoria$minuto, teste_memoria$ram, type = "l", col = "darkgreen", ylim = c(0, 100), main = "Uso de RAM no teste de memória", xlab = "Minutos da coleta", ylab = "RAM (%)")
+abline(v = c(inicio_memoria_min, fim_memoria_min), col = "red", lty = 2)
+plot(teste_memoria$minuto, teste_memoria$memoria_disponivel, type = "l", col = "darkgreen", main = "Memória disponível", xlab = "Minutos da coleta", ylab = "GB")
+abline(v = c(inicio_memoria_min, fim_memoria_min), col = "red", lty = 2)
+limite_swap = max(c(teste_memoria$swap_entrada, teste_memoria$swap_saida), na.rm = TRUE) + 0.01
+plot(teste_memoria$minuto, teste_memoria$swap_entrada, type = "l", col = "blue", ylim = c(0, limite_swap), main = "Atividade de swap", xlab = "Minutos da coleta", ylab = "MB/s")
+lines(teste_memoria$minuto, teste_memoria$swap_saida, col = "red", lty = 2)
+abline(v = c(inicio_memoria_min, fim_memoria_min), col = "gray", lty = 3)
+legend("topright", legend = c("Entrada", "Saída"), col = c("blue", "red"), lty = c(1, 2), bty = "n")
+par(mfrow = c(1, 1))
+```
+
+Durante o teste, a RAM ficou em média em 48,10% e a memória disponível em cerca de 3,97 GB. Depois da carga, a RAM ficou em 33,85%, com cerca de 5,06 GB disponíveis. A ocupação inicial variou bastante, então não usamos apenas o primeiro ponto para estimar o efeito da carga.
+
+Foi possível observar o uso de memória sem esgotar a RAM. Houve pouca atividade de swap, e nenhum novo OOM foi registrado nas leituras válidas. Esse experimento não comprova o comportamento sob falta extrema de memória. Ausência de paginação intensa não torna as métricas de swap inúteis.
+
+## Disco: atividade, tempo e fila
+
+Os painéis mostram métricas diferentes do mesmo dispositivo físico. As linhas vermelhas marcam a carga. Os tempos são médias estimadas por operação no intervalo, não o tempo de resposta da aplicação. As lacunas de `sem_operacoes` ficam ausentes, sem substituir por zero.
+
+```{r disco-tempo, fig.width=10, fig.height=9}
+par(mfrow = c(3, 2))
+plot(teste_disco$minuto, teste_disco$leitura, type = "l", col = "blue", main = "Leitura", xlab = "Minutos", ylab = "MB/s")
+abline(v = c(inicio_disco_min, fim_disco_min), col = "red", lty = 2)
+plot(teste_disco$minuto, teste_disco$escrita, type = "l", col = "blue", main = "Escrita", xlab = "Minutos", ylab = "MB/s")
+abline(v = c(inicio_disco_min, fim_disco_min), col = "red", lty = 2)
+plot(teste_disco$minuto, teste_disco$tempo_leitura, type = "l", col = "blue", main = "Tempo médio de leitura", xlab = "Minutos", ylab = "ms")
+abline(v = c(inicio_disco_min, fim_disco_min), col = "red", lty = 2)
+plot(teste_disco$minuto, teste_disco$tempo_escrita, type = "l", col = "blue", main = "Tempo médio de escrita", xlab = "Minutos", ylab = "ms")
+abline(v = c(inicio_disco_min, fim_disco_min), col = "red", lty = 2)
+plot(teste_disco$minuto, teste_disco$fila, type = "l", col = "darkgreen", main = "Fila média", xlab = "Minutos", ylab = "Operações")
+abline(v = c(inicio_disco_min, fim_disco_min), col = "red", lty = 2)
+plot(teste_disco$minuto, teste_disco$espera_io, type = "l", col = "darkgreen", main = "Espera por I/O", xlab = "Minutos", ylab = "%")
+abline(v = c(inicio_disco_min, fim_disco_min), col = "red", lty = 2)
+par(mfrow = c(1, 1))
+```
+
+Durante o teste, as médias foram aproximadamente 279,27 MB/s de leitura e 280,66 MB/s de escrita. A fila média passou de cerca de 0,007 antes da carga para 0,830 durante, e a espera por I/O aumentou para cerca de 4,55%.
+
+Os tempos médios de leitura e escrita não aumentaram junto: ficaram em aproximadamente 0,058 ms e 0,298 ms durante a carga. O padrão de operações mudou e houve poucas amostras válidas de leitura antes e depois, então não podemos atribuir toda essa diferença a uma melhoria do disco. O resultado mostra por que taxa de transferência, fila e tempo de operação devem ser interpretados juntos. Esse teste gerou atividade, mas não demonstra sozinho um gargalo.
+
+A fila média inclui operações em andamento, não somente as esperando. Não somamos o disco físico com suas partições, para evitar contar as mesmas operações mais de uma vez.
+
+## Outliers
+
+Vamos identificar valores de CPU afastados dentro de cada cenário, usando o critério do boxplot. Não usamos o limite do básico para classificar todas as leituras dos outros cenários como outliers.
+
+```{r outliers}
+out_basico = boxplot.stats(basico$cpu)$out
+out_cpu = boxplot.stats(estresse_cpu$cpu)$out
+out_memoria = boxplot.stats(estresse_memoria$cpu)$out
+out_disco = boxplot.stats(estresse_disco$cpu)$out
+
+quantidade_outliers = data.frame(
+  cenario = c("Básico", "CPU", "Memória", "Disco"),
+  leituras = c(length(out_basico), length(out_cpu), length(out_memoria), length(out_disco))
+)
+knitr::kable(quantidade_outliers)
+
+outliers_cpu = estresse_cpu[estresse_cpu$cpu %in% out_cpu, c("TIMESTAMP", "minuto", "cpu", "fase")]
+knitr::kable(outliers_cpu, digits = 3)
+```
+
+Cada linha é uma leitura, não um episódio ou alerta. Um valor afastado do padrão pode ser uma atividade comum. Os logs explicam quando a carga programada estava em execução, mas não identificam todos os processos e atividades em segundo plano. Não vamos inventar causas para pontos sem registro.
+
+## Correlações
+
+A correlação de Pearson mede associação linear, de -1 a 1. Ela não prova causa. Vamos observar a matriz geral e depois algumas relações dentro de cada cenário. A mistura de cenários pode criar correlações fortes só pela mudança entre grupos.
+
+```{r matriz}
+variaveis = comparacao[, c("cpu", "carga_5", "ram", "memoria_disponivel", "swap_saida", "leitura", "fila", "espera_io")]
+matriz_correlacao = cor(variaveis, use = "pairwise.complete.obs")
+knitr::kable(matriz_correlacao, digits = 2)
+```
+
+```{r correlacao-cenarios}
+correlacoes = data.frame(
+  cenario = c("Básico", "CPU", "Memória", "Disco"),
+  cpu_carga = c(
+    cor(basico$cpu, basico$carga_5, use = "complete.obs"),
+    cor(estresse_cpu$cpu, estresse_cpu$carga_5, use = "complete.obs"),
+    cor(estresse_memoria$cpu, estresse_memoria$carga_5, use = "complete.obs"),
+    cor(estresse_disco$cpu, estresse_disco$carga_5, use = "complete.obs")
+  ),
+  leitura_espera_io = c(
+    cor(basico$leitura, basico$espera_io, use = "complete.obs"),
+    cor(estresse_cpu$leitura, estresse_cpu$espera_io, use = "complete.obs"),
+    cor(estresse_memoria$leitura, estresse_memoria$espera_io, use = "complete.obs"),
+    cor(estresse_disco$leitura, estresse_disco$espera_io, use = "complete.obs")
+  ),
+  fila_tempo_leitura = c(
+    cor(basico$fila, basico$tempo_leitura, use = "complete.obs"),
+    cor(estresse_cpu$fila, estresse_cpu$tempo_leitura, use = "complete.obs"),
+    cor(estresse_memoria$fila, estresse_memoria$tempo_leitura, use = "complete.obs"),
+    cor(estresse_disco$fila, estresse_disco$tempo_leitura, use = "complete.obs")
+  )
+)
+knitr::kable(correlacoes, digits = 2)
+```
+
+Também vamos conferir quantos pares válidos existem em cada cálculo. Uma correlação próxima de -1 ou 1 baseada em pouquíssimos pares não sustenta uma conclusão sobre o comportamento do recurso.
+
+```{r quantidade-pares}
+pares_cpu_carga = complete.cases(comparacao[, c("cpu", "carga_5")])
+pares_leitura_espera = complete.cases(comparacao[, c("leitura", "espera_io")])
+pares_fila_tempo = complete.cases(comparacao[, c("fila", "tempo_leitura")])
+
+quantidade_pares = data.frame(
+  cpu_carga = tapply(pares_cpu_carga, comparacao$cenario, sum),
+  leitura_espera_io = tapply(pares_leitura_espera, comparacao$cenario, sum),
+  fila_tempo_leitura = tapply(pares_fila_tempo, comparacao$cenario, sum)
+)
+knitr::kable(quantidade_pares)
+```
+
+`complete.obs` usa somente pares em que as duas métricas têm valor válido. A matriz geral usa os pares disponíveis para cada relação, então os tamanhos de amostra podem ser diferentes. Leituras próximas no tempo não são experimentos independentes. Não usamos esses números para afirmar causalidade ou escolher limites automáticos de alerta.
+
+No teste de memória, a saída de swap ficou em zero em muitas leituras. Vamos observar sua relação com RAM, junto ao gráfico temporal.
+
+```{r ram-swap, fig.width=7, fig.height=5}
+plot(estresse_memoria$ram, estresse_memoria$swap_saida, pch = 19, col = "blue", xlab = "Uso de RAM (%)", ylab = "Saída de swap (MB/s)", main = "RAM e saída de swap durante a carga de memória")
+```
+
+Pouca variação ou poucas ocorrências não sustentam uma conclusão geral sobre pressão de memória. CPU de processo não foi comparada com CPU do host, pois processos não entraram nesses arquivos. A relação inversa entre ocupação e memória disponível também envolve a definição usada pelo coletor, não duas medições independentes.
+
+## Tendência de ocupação do armazenamento
+
+Agora vamos observar o espaço ocupado em `/home` ao longo das quatro coletas. Os pontos respeitam os horários reais. Não houve coleta nos intervalos entre arquivos.
+
+```{r armazenamento, fig.width=8, fig.height=5}
+armazenamento = dados[, c("horario", "espaco_usado")]
+armazenamento = armazenamento[is.finite(armazenamento$espaco_usado), ]
+armazenamento = armazenamento[order(armazenamento$horario), ]
+armazenamento$minuto = as.numeric(difftime(armazenamento$horario, armazenamento$horario[1], units = "mins"))
+
+modelo = lm(espaco_usado ~ minuto, data = armazenamento)
+plot(armazenamento$minuto, armazenamento$espaco_usado, pch = 20, col = "blue", xlab = "Minutos desde a primeira coleta", ylab = "Espaço ocupado em /home (GB)", main = "Ocupação observada e ajuste linear")
+abline(modelo, col = "red", lwd = 2)
+print(coef(modelo))
+```
+
+`lm` ajusta uma reta. O coeficiente de `minuto` representa a variação estimada em GB por minuto nesta amostra. O teste usa arquivos temporários, então o espaço pode subir e depois cair. Não é uma tendência de crescimento contínuo.
+
+Temos menos de meia hora de observação e uma carga que cria e remove arquivos. Por isso, **não calculamos dias até encher** nem convertemos essa inclinação em crescimento diário. A previsão de esgotamento precisa de histórico mais longo, crescimento consistente e controle de mudanças na capacidade. Essa limitação deve aparecer como “Sem previsão disponível” no site, em vez de um número sem sustentação.
+
+## O que isso indica para o cardápio
+
+| Métricas | O que observamos | Como ajudam |
+|---|---|---|
+| Uso de CPU | Aumento claro durante o teste e queda após encerrar | Acompanhar ocupação atual e histórico |
+| Carga média | Resposta gradual e permanência elevada após a carga | Acrescentar contexto temporal, sem tratar como percentual ou prova isolada de saturação |
+| RAM e memória disponível | Mudança durante a carga moderada, com variação prévia do estado inicial | Mostrar ocupação e margem disponível em unidades diferentes |
+| Atividade de swap | Pouca atividade no teste de memória | Investigar movimento de dados; este teste não valida uma condição extrema de falta de RAM |
+| Leitura, escrita e IOPS | Atividade de disco respondeu à carga | Mostrar volume transferido e quantidade de operações, que não são a mesma medida |
+| Tempos de I/O, fila e espera | A fila e a espera cresceram; tempos médios não acompanharam da mesma forma | Investigar o conjunto, sem assumir que todos devem subir juntos |
+| Espaço ocupado | Observação curta e efeito dos arquivos temporários | Monitorar ocupação; ainda não sustenta previsão de esgotamento |
+
+Uso de RAM e memória disponível têm relação forte por definição, mas atendem perguntas diferentes na interface: quanto está ocupado e quanto ainda pode ser usado. Leitura e escrita também não devem ser fundidas, porque os padrões e tempos podem ser diferentes. Correlação alta, sozinha, não determina que devemos remover uma métrica.
+
+Os resultados dão uma justificativa inicial para manter CPU, memória disponível e ocupação, atividade de armazenamento e contexto de I/O no monitoramento. Não são suficientes para mudar todas as métricas essenciais ou definir limites universais de alerta. Rede, OOM, uso por CPU lógica, frequência, interrupções, trocas de contexto, inodes, processos e containers não foram avaliados em detalhe neste relatório; não devem ser descartados por isso.
+
+## Conclusão
+
+As quatro coletas reais permitiram observar respostas diferentes dos recursos. CPU respondeu claramente à carga de processamento. A carga moderada de memória alterou a ocupação, sem provocar esgotamento. O disco apresentou mais transferência, fila e espera por I/O, sem aumento correspondente nos tempos médios.
+
+Gráficos e estatísticas se complementam: médias resumem, distribuições mostram frequência e dispersão, e a série temporal mostra quando a mudança aconteceu. Outliers precisam de contexto e não viram alertas críticos automaticamente.
