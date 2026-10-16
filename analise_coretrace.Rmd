@@ -44,6 +44,7 @@ teste_cpu$cenario = "CPU"
 teste_memoria$cenario = "Memória"
 teste_disco$cenario = "Disco"
 
+# Inicializa os cenários com fase de antes para depois ajustarmos de acordo com o timestamp
 basico$fase = "Sem carga"
 teste_cpu$fase = "Antes"
 teste_memoria$fase = "Antes"
@@ -54,33 +55,60 @@ Agora vamos transformar os horários em datas que o R consegue comparar.
 `as.POSIXct` faz essa conversão.
 
 ```{r marcar-fases}
-teste_cpu$horario = as.POSIXct(teste_cpu$TIMESTAMP, format = "%Y-%m-%dT%H:%M:%OS", tz = "America/Sao_Paulo")
-teste_memoria$horario = as.POSIXct(teste_memoria$TIMESTAMP, format = "%Y-%m-%dT%H:%M:%OS", tz = "America/Sao_Paulo")
-teste_disco$horario = as.POSIXct(teste_disco$TIMESTAMP, format = "%Y-%m-%dT%H:%M:%OS", tz = "America/Sao_Paulo")
-basico$horario = as.POSIXct(basico$TIMESTAMP, format = "%Y-%m-%dT%H:%M:%OS", tz = "America/Sao_Paulo")
+teste_cpu$horario = as.POSIXct(
+  teste_cpu$TIMESTAMP,
+  format = "%Y-%m-%dT%H:%M:%OS",
+  tz = "America/Sao_Paulo")
 
+teste_memoria$horario = as.POSIXct(
+  teste_memoria$TIMESTAMP,
+  format = "%Y-%m-%dT%H:%M:%OS",
+  tz = "America/Sao_Paulo")
+
+teste_disco$horario = as.POSIXct(
+  teste_disco$TIMESTAMP,
+  format = "%Y-%m-%dT%H:%M:%OS",
+  tz = "America/Sao_Paulo")
+
+basico$horario = as.POSIXct(
+  basico$TIMESTAMP,
+  format = "%Y-%m-%dT%H:%M:%OS",
+  tz = "America/Sao_Paulo")
+
+# Horários das cargas, de acordo com log do stress
 inicio_cpu = as.POSIXct("2026-10-15 18:10:09", tz = "America/Sao_Paulo")
 fim_cpu = as.POSIXct("2026-10-15 18:13:09", tz = "America/Sao_Paulo")
+
 inicio_memoria = as.POSIXct("2026-10-15 18:17:02", tz = "America/Sao_Paulo")
 fim_memoria = as.POSIXct("2026-10-15 18:20:02", tz = "America/Sao_Paulo")
+
 inicio_disco = as.POSIXct("2026-10-15 18:23:45", tz = "America/Sao_Paulo")
 fim_disco = as.POSIXct("2026-10-15 18:26:45", tz = "America/Sao_Paulo")
 
+# Ajuste nas colunas de fase usando os horários como parâmetro de intervalo
+# "Nas linhas em que horário é igual ou depois do início e antes do fim da carga, escrever 'Durante', quando passar do fim, escrever 'Depois'"
 teste_cpu$fase[teste_cpu$horario >= inicio_cpu & teste_cpu$horario < fim_cpu] = "Durante"
 teste_cpu$fase[teste_cpu$horario >= fim_cpu] = "Depois"
+
 teste_memoria$fase[teste_memoria$horario >= inicio_memoria & teste_memoria$horario < fim_memoria] = "Durante"
 teste_memoria$fase[teste_memoria$horario >= fim_memoria] = "Depois"
+
 teste_disco$fase[teste_disco$horario >= inicio_disco & teste_disco$horario < fim_disco] = "Durante"
 teste_disco$fase[teste_disco$horario >= fim_disco] = "Depois"
 
 dados = rbind(basico, teste_cpu, teste_memoria, teste_disco)
-dados$cenario = factor(dados$cenario, levels = c("Básico", "CPU", "Memória", "Disco"))
+
+# Factor para categorizar usando as opções da coluna. Levels define a ordem
+dados$cenario = factor(
+  dados$cenario,
+  levels = c("Básico", "CPU", "Memória", "Disco")
+  )
+
+# Para que os gráficos tenham o eixo x em minutos
 dados$minuto = dados$TEMPO_SEGUNDOS / 60
 
 knitr::kable(table(dados$cenario, dados$fase))
 ```
-
-`rbind` junta as linhas dos quatro arquivos. `factor` mantém os cenários na ordem que escolhemos. A fase usa o horário registrado de cada rodada.
 
 ## Preparando as métricas
 
@@ -96,6 +124,7 @@ dados$cpu = dados$cpu_percent
 dados$ram = dados$ram_percent
 dados$memoria_disponivel = dados$ram_available
 dados$carga_5 = dados$load_avg_5
+# Convertido de bytes por segundo para mb por segundo
 dados$leitura = dados$disco_io_0_read_bytes / 1000000
 dados$escrita = dados$disco_io_0_write_bytes / 1000000
 dados$iops_leitura = dados$disco_io_0_read_count
@@ -108,56 +137,132 @@ dados$swap_entrada = dados$swap_sin / 1000000
 dados$swap_saida = dados$swap_sout / 1000000
 dados$espaco_usado = dados$disco_volume_2_used
 ```
-
-Usamos somente valores que tem status `ok`. Status que sejam `aquecendo`, `sem_operacoes` ou `erro_fonte` continuam nos CSVs, mas os valores correspondentes ficam ausentes na análise. Zero válido continua sendo zero. `is.finite` verifica se o valor é um número finito, excluindo infinitos.
+Utilizamos somente valores que tem status `ok`. Status que sejam `aquecendo`, `sem_operacoes` ou `erro_fonte` continuam nos CSVs, mas os valores correspondentes ficam ausentes na análise. Zero válido continua sendo zero. `is.finite` verifica se o valor é um número finito, excluindo infinitos.
 
 ```{r validar}
-invalida = is.na(dados$cpu_percent_status) | dados$cpu_percent_status != "ok" | !is.finite(dados$cpu) | dados$cpu < 0
+# Guarda como true/false se é inválida cada linha
+invalida = 
+  is.na(dados$cpu_percent_status) |
+  dados$cpu_percent_status != "ok" |
+  !is.finite(dados$cpu) |
+  dados$cpu < 0
+
+# Se já era inválida, continua marcada como true. Mas verifique se a porcentagem passa de 100% para marcar como inválida
 invalida = invalida | dados$cpu > 100
+# Substitui o valor por NA
 dados$cpu[invalida] = NA
 
-invalida = is.na(dados$ram_percent_status) | dados$ram_percent_status != "ok" | !is.finite(dados$ram) | dados$ram < 0
+invalida =
+  is.na(dados$ram_percent_status) |
+  dados$ram_percent_status != "ok" |
+  !is.finite(dados$ram) |
+  dados$ram < 0
+
 invalida = invalida | dados$ram > 100
 dados$ram[invalida] = NA
 
-invalida = is.na(dados$ram_available_status) | dados$ram_available_status != "ok" | !is.finite(dados$memoria_disponivel) | dados$memoria_disponivel < 0
+invalida = 
+  is.na(dados$ram_available_status) |
+  dados$ram_available_status != "ok" |
+  !is.finite(dados$memoria_disponivel) |
+  dados$memoria_disponivel < 0
+
 dados$memoria_disponivel[invalida] = NA
 
-invalida = is.na(dados$load_avg_5_status) | dados$load_avg_5_status != "ok" | !is.finite(dados$carga_5) | dados$carga_5 < 0
+invalida = 
+  is.na(dados$load_avg_5_status) |
+  dados$load_avg_5_status != "ok" |
+  !is.finite(dados$carga_5) |
+  dados$carga_5 < 0
+
 dados$carga_5[invalida] = NA
 
-invalida = is.na(dados$disco_io_0_read_bytes_status) | dados$disco_io_0_read_bytes_status != "ok" | !is.finite(dados$leitura) | dados$leitura < 0
+invalida = 
+  is.na(dados$disco_io_0_read_bytes_status) |
+  dados$disco_io_0_read_bytes_status != "ok" |
+  !is.finite(dados$leitura) |
+  dados$leitura < 0
+
 dados$leitura[invalida] = NA
 
-invalida = is.na(dados$disco_io_0_write_bytes_status) | dados$disco_io_0_write_bytes_status != "ok" | !is.finite(dados$escrita) | dados$escrita < 0
+invalida = 
+  is.na(dados$disco_io_0_write_bytes_status) |
+  dados$disco_io_0_write_bytes_status != "ok" |
+  !is.finite(dados$escrita) |
+  dados$escrita < 0
+
 dados$escrita[invalida] = NA
 
-invalida = is.na(dados$disco_io_0_read_count_status) | dados$disco_io_0_read_count_status != "ok" | !is.finite(dados$iops_leitura) | dados$iops_leitura < 0
+invalida = 
+  is.na(dados$disco_io_0_read_count_status) |
+  dados$disco_io_0_read_count_status != "ok" |
+  !is.finite(dados$iops_leitura) |
+  dados$iops_leitura < 0
+
 dados$iops_leitura[invalida] = NA
 
-invalida = is.na(dados$disco_io_0_write_count_status) | dados$disco_io_0_write_count_status != "ok" | !is.finite(dados$iops_escrita) | dados$iops_escrita < 0
+invalida = 
+  is.na(dados$disco_io_0_write_count_status) |
+  dados$disco_io_0_write_count_status != "ok" |
+  !is.finite(dados$iops_escrita) |
+  dados$iops_escrita < 0
+
 dados$iops_escrita[invalida] = NA
 
-invalida = is.na(dados$disco_io_0_queue_status) | dados$disco_io_0_queue_status != "ok" | !is.finite(dados$fila) | dados$fila < 0
+invalida = 
+  is.na(dados$disco_io_0_queue_status) |
+  dados$disco_io_0_queue_status != "ok" |
+  !is.finite(dados$fila) |
+  dados$fila < 0
+
 dados$fila[invalida] = NA
 
-invalida = is.na(dados$disco_io_0_read_time_ms_status) | dados$disco_io_0_read_time_ms_status != "ok" | !is.finite(dados$tempo_leitura) | dados$tempo_leitura < 0
+invalida = 
+  is.na(dados$disco_io_0_read_time_ms_status) |
+  dados$disco_io_0_read_time_ms_status != "ok" |
+  !is.finite(dados$tempo_leitura) |
+  dados$tempo_leitura < 0
+
 dados$tempo_leitura[invalida] = NA
 
-invalida = is.na(dados$disco_io_0_write_time_ms_status) | dados$disco_io_0_write_time_ms_status != "ok" | !is.finite(dados$tempo_escrita) | dados$tempo_escrita < 0
+invalida = 
+  is.na(dados$disco_io_0_write_time_ms_status) |
+  dados$disco_io_0_write_time_ms_status != "ok" |
+  !is.finite(dados$tempo_escrita) |
+  dados$tempo_escrita < 0
+
 dados$tempo_escrita[invalida] = NA
 
-invalida = is.na(dados$cpu_iowait_status) | dados$cpu_iowait_status != "ok" | !is.finite(dados$espera_io) | dados$espera_io < 0
+invalida = 
+  is.na(dados$cpu_iowait_status) |
+  dados$cpu_iowait_status != "ok" |
+  !is.finite(dados$espera_io) |
+  dados$espera_io < 0
+
 invalida = invalida | dados$espera_io > 100
 dados$espera_io[invalida] = NA
 
-invalida = is.na(dados$swap_sin_status) | dados$swap_sin_status != "ok" | !is.finite(dados$swap_entrada) | dados$swap_entrada < 0
+invalida = 
+  is.na(dados$swap_sin_status) |
+  dados$swap_sin_status != "ok" |
+  !is.finite(dados$swap_entrada) |
+  dados$swap_entrada < 0
+
 dados$swap_entrada[invalida] = NA
 
-invalida = is.na(dados$swap_sout_status) | dados$swap_sout_status != "ok" | !is.finite(dados$swap_saida) | dados$swap_saida < 0
+invalida = is.na(dados$swap_sout_status) |
+  dados$swap_sout_status != "ok" |
+  !is.finite(dados$swap_saida) |
+  dados$swap_saida < 0
+
 dados$swap_saida[invalida] = NA
 
-invalida = is.na(dados$disco_volume_2_used_status) | dados$disco_volume_2_used_status != "ok" | !is.finite(dados$espaco_usado) | dados$espaco_usado < 0
+invalida = 
+  is.na(dados$disco_volume_2_used_status) |
+  dados$disco_volume_2_used_status != "ok" |
+  !is.finite(dados$espaco_usado) |
+  dados$espaco_usado < 0
+
 dados$espaco_usado[invalida] = NA
 
 ```
@@ -176,6 +281,7 @@ A comparação abaixo usa todo o básico e os trechos de carga dos outros cenár
 `tapply` calcula uma estatística separada por cenário. `na.rm = TRUE` exclui os valores ausentes do cálculo. A coluna de leituras válidas mostra quantas observações sustentam cada resultado. Os quartis dividem a distribuição, e o percentil 95 é o valor abaixo do qual ficam aproximadamente 95% das leituras.
 
 ```{r selecionar-comparacao}
+# Manter todas as linhas do básico ou as linhas em que a carga estava acontecendo
 comparacao = dados[dados$cenario == "Básico" | dados$fase == "Durante", ]
 knitr::kable(table(comparacao$cenario))
 ```
@@ -184,14 +290,23 @@ knitr::kable(table(comparacao$cenario))
 
 ```{r resumo-cpu}
 resumo_cpu = data.frame(
+  # Quantas batem
   validas = tapply(!is.na(comparacao$cpu), comparacao$cenario, sum),
+  # Soma das leituras dividida pela quantidade válida
   media = tapply(comparacao$cpu, comparacao$cenario, mean, na.rm = TRUE),
+  # Valor central das leituras ordenadas
   mediana = tapply(comparacao$cpu, comparacao$cenario, median, na.rm = TRUE),
+  # Menor leitura observada
   minimo = tapply(comparacao$cpu, comparacao$cenario, min, na.rm = TRUE),
+  # Maior leitura observada
   maximo = tapply(comparacao$cpu, comparacao$cenario, max, na.rm = TRUE),
+  # Aproximadamente 25% das leituras ficaram até esse valor
   quartil_1 = tapply(comparacao$cpu, comparacao$cenario, quantile, probs = 0.25, na.rm = TRUE),
+  # Aproximadamente 75% das leituras ficaram até esse valor
   quartil_3 = tapply(comparacao$cpu, comparacao$cenario, quantile, probs = 0.75, na.rm = TRUE),
+  # O quanto as leituras variaram em torno da média
   desvio_padrao = tapply(comparacao$cpu, comparacao$cenario, sd, na.rm = TRUE),
+  # Aproximadamente 95% das leituras ficaram até esse valor
   percentil_95 = tapply(comparacao$cpu, comparacao$cenario, quantile, probs = 0.95, na.rm = TRUE)
 )
 knitr::kable(resumo_cpu, digits = 3)
@@ -434,10 +549,7 @@ resumo_espaco_usado = data.frame(
 )
 knitr::kable(resumo_espaco_usado, digits = 3)
 ```
-
-Essas tabelas descrevem as leituras que foram válidas. Pra tempos de I/O, a média considera somente intervalos com operações.
-
-A RAM variou bastante nos trechos antes das cargas. Isso mostra que o estado inicial não ficou idêntico entre os arquivos. Por isso também vamos comparamos as fases dentro de cada teste, sem atribuir toda diferença entre arquivos só pela carga aplicada.
+A RAM variou bastante nos trechos antes das cargas. Isso mostra que o estado inicial não ficou idêntico entre os arquivos. Por isso também comparamos as fases dentro de cada teste, sem atribuir toda diferença entre arquivos só pela carga aplicada.
 
 ```{r fases}
 knitr::kable(tapply(dados$cpu, list(dados$cenario, dados$fase), mean, na.rm = TRUE), digits = 2)
@@ -455,10 +567,43 @@ estresse_memoria = comparacao[comparacao$cenario == "Memória", ]
 estresse_disco = comparacao[comparacao$cenario == "Disco", ]
 
 par(mfrow = c(2, 2))
-hist(basico$cpu, breaks = seq(0, 100, 5), freq = FALSE, col = "lightblue", main = "Básico", xlab = "CPU (%)", ylab = "Densidade")
-hist(estresse_cpu$cpu, breaks = seq(0, 100, 5), freq = FALSE, col = "lightblue", main = "Carga de CPU", xlab = "CPU (%)", ylab = "Densidade")
-hist(estresse_memoria$cpu, breaks = seq(0, 100, 5), freq = FALSE, col = "lightblue", main = "Carga de memória", xlab = "CPU (%)", ylab = "Densidade")
-hist(estresse_disco$cpu, breaks = seq(0, 100, 5), freq = FALSE, col = "lightblue", main = "Carga de disco", xlab = "CPU (%)", ylab = "Densidade")
+
+hist(
+  basico$cpu,
+  breaks = seq(0, 100, 5),
+  freq = FALSE,
+  col = "lightblue",
+  main = "Básico",
+  xlab = "CPU (%)",
+  ylab = "Densidade")
+
+hist(
+  estresse_cpu$cpu,
+  breaks = seq(0, 100, 5),
+  freq = FALSE,
+  col = "lightblue",
+  main = "Carga de CPU",
+  xlab = "CPU (%)",
+  ylab = "Densidade")
+
+hist(
+  estresse_memoria$cpu,
+  breaks = seq(0, 100, 5),
+  freq = FALSE,
+  col = "lightblue",
+  main = "Carga de memória",
+  xlab = "CPU (%)",
+  ylab = "Densidade")
+
+hist(
+  estresse_disco$cpu,
+  breaks = seq(0, 100, 5),
+  freq = FALSE,
+  col = "lightblue",
+  main = "Carga de disco",
+  xlab = "CPU (%)",
+  ylab = "Densidade")
+
 par(mfrow = c(1, 1))
 ```
 
