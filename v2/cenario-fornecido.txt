@@ -1,0 +1,245 @@
+Cenário do cenario-mock/ — CoreTrace
+1. Objetivo
+
+O cenario-mock/ é uma demonstração fictícia de uma operação de delivery do iFood durante a sobrecarga do jantar de uma segunda-feira.
+
+O objetivo é fornecer ao site do CoreTrace uma semana inteira de métricas simuladas, com uma história coerente e números consistentes entre todas as telas.
+
+Importante: nada disso representa a infraestrutura real do iFood.
+
+2. Data, horário e infraestrutura
+Momento fixo: segunda-feira, 19/10/2026, às 20h30 (horário de Brasília).
+Janela histórica: de 12/10/2026 às 20h30 até 19/10/2026 às 20h30.
+Coleta: uma amostra por minuto, totalizando 10.081 pontos por servidor.
+Total: 10 servidores, divididos em três perfis.
+Perfis de servidores
+
+Carrinho (4 servidores):
+
+cart-api-07
+cart-api-12
+cart-api-02
+cart-api-09
+
+Responsáveis pela montagem e finalização de pedidos, com maior sensibilidade a CPU e RAM.
+
+Financeiro (3 servidores):
+
+pay-api-04
+pay-api-06
+pay-db-02
+
+Responsáveis por pagamentos e transações.
+
+Catálogo (3 servidores):
+
+catalog-api-03
+catalog-api-05
+catalog-api-08
+
+Responsáveis por consultas e dados de produtos.
+
+3. História dos incidentes durante a semana
+
+Cada episódio deve ter início, pico e recuperação, com transições calculadas a partir das métricas e dos limites configurados.
+
+Terça-feira, 13/10 — Pico moderado no almoço: RAM do cart-api-02 e CPU do catalog-api-03 entram em atenção e depois se recuperam.
+Quarta-feira, 14/10 — Jantar: CPU do cart-api-09 e do pay-api-06 entra em atenção.
+Quinta-feira, 15/10 — Almoço: RAM do pay-db-02 chega a 84% e a CPU do catalog-api-03 entra em atenção.
+Sexta-feira, 16/10 — Campanha comercial: CPU do pay-api-06 chega a 96% (crítico), enquanto o cart-api-02 entra em atenção. Ambos se recuperam.
+Sábado, 17/10 — Instabilidade de rede: catalog-api-03 registra 9 erros/s e 16 descartes/s. A CPU do cart-api-12 também entra em atenção. Os incidentes são encerrados.
+Domingo, 18/10 — Jantar recorrente: cart-api-07 chega a 86% de CPU e pay-db-02 chega a 82% de RAM. Ambos entram em atenção.
+Segunda-feira, 19/10 — Almoço: CPU do catalog-api-03 e RAM do cart-api-02 entram em atenção e se recuperam antes das 14h.
+Segunda-feira, 19/10 — Jantar: começa o incidente principal, que permanece aberto às 20h30.
+4. Incidente principal: segunda-feira à noite
+
+A tarde permanece tranquila. Durante o jantar, a pressão sobre a infraestrutura aumenta de forma escalonada:
+
+18h30: cart-api-12 entra em atenção por CPU acima de 70%.
+18h45: pay-db-02 entra em atenção por RAM acima de 75%.
+19h00: cart-api-07 entra em atenção por CPU.
+19h10: pay-api-04 entra em atenção por CPU.
+19h25 a 19h30: a RAM de cart-api-07 e pay-api-04 também entra em atenção.
+19h50: pay-api-04 passa para crítico por CPU acima de 92%.
+20h05: cart-api-07 passa para crítico por CPU acima de 90%.
+20h30: horário de referência para o estado final do cenário.
+
+Regra importante: esses horários não devem ser definidos manualmente no resultado. O gerador deve calcular as transições comparando as métricas com os limites configurados no banco de dados.
+
+5. Estado final às 20h30
+Servidor	CPU	RAM	Situação
+pay-api-04	95%	83%	Crítico: CPU crítica e RAM em atenção
+cart-api-07	94%	81%	Crítico: CPU crítica e RAM em atenção
+cart-api-12	78%	63%	Atenção: CPU
+pay-db-02	65%	79%	Atenção: RAM
+Outros 6 servidores	—	—	Normais
+Resumo dos indicadores
+2 servidores críticos
+2 servidores em atenção
+6 servidores normais
+6 alertas ativos
+
+Os seis alertas são distribuídos da seguinte forma:
+
+pay-api-04: CPU crítica e RAM em atenção.
+cart-api-07: CPU crítica e RAM em atenção.
+cart-api-12: CPU em atenção.
+pay-db-02: RAM em atenção.
+
+Um servidor com dois componentes fora dos limites conta como um servidor afetado, mas gera dois alertas independentes.
+
+6. Previsão independente de disco
+
+O catalog-api-05 possui um disco /dados com as seguintes características:
+
+Capacidade: 500 GB.
+Uso atual: 77%.
+Crescimento estimado: 1,5 ponto percentual por dia.
+Limite crítico: 95%.
+Previsão: aproximadamente 12 dias até atingir o limite crítico.
+
+Essa previsão deve ser apresentada como uma tendência de capacidade, e não como um alerta ativo. O uso atual de 77% ainda está abaixo do limite de atenção de 80%.
+
+7. Dashboard geral
+
+A dashboard deve manter o layout existente, com os mesmos quatro cards e dois gráficos.
+
+Cards
+Servidores em atenção.
+Servidores críticos.
+Alertas ativos.
+Previsão de capacidade.
+Gráficos
+Evolução dos servidores em alerta.
+Alertas por recurso.
+
+Todos os indicadores, gráficos, alertas e detalhes devem ser derivados da mesma fonte de dados simulados, sem divergências entre as telas.
+
+8. Filtros de tempo
+
+Os filtros disponíveis são:
+
+30m, 1h, 6h, 12h, 24h e 7d.
+
+Todos devem representar recortes do mesmo histórico. Não devem gerar métricas novas nem alterar os valores atuais dos servidores.
+
+Os filtros devem modificar os gráficos e a lista de incidentes conforme o período selecionado:
+
+30 minutos: mostra a escalada final e os dois servidores críticos.
+1 hora: mostra a progressão dos incidentes e as mudanças de estado.
+6 horas: mostra a tarde tranquila seguida pela escalada do jantar.
+12 horas: permite comparar os incidentes do almoço e do jantar.
+24 horas: inclui o jantar de domingo e o incidente de segunda-feira.
+7 dias: mostra toda a recorrência semanal, o incidente crítico de sexta-feira e a instabilidade de rede de sábado.
+
+Os valores atuais devem continuar representando o estado fixo de 19/10/2026 às 20h30, independentemente do filtro selecionado.
+
+9. Tela de alertas
+
+A tela deve apresentar exatamente os seis pares servidor + componente ativos no horário de referência:
+
+pay-api-04 — CPU crítica.
+pay-api-04 — RAM em atenção.
+cart-api-07 — CPU crítica.
+cart-api-07 — RAM em atenção.
+cart-api-12 — CPU em atenção.
+pay-db-02 — RAM em atenção.
+
+Os limites e os estados devem ser consistentes com os exibidos na dashboard e nos detalhes de cada servidor.
+
+10. Detalhes dos servidores
+
+Deve existir uma única interface de detalhes para os dez servidores, alterando apenas os dados conforme o servidor selecionado.
+
+A interface deve apresentar:
+
+CPU total e utilização por núcleo lógico.
+Carga do sistema.
+RAM utilizada e disponível.
+Swap.
+OOM, sempre igual a zero neste cenário.
+Discos e previsão de capacidade.
+I/O.
+Rede.
+Processos.
+Docker, quando aplicável.
+
+Os três servidores que devem receber maior nível de detalhamento são:
+
+pay-api-04
+cart-api-07
+cart-api-12
+Docker
+
+O monitoramento Docker deve ser simulado apenas nos servidores dos perfis Carrinho e Financeiro, com três containers por servidor.
+
+Para os servidores do perfil Catálogo, a interface deve exibir “Não monitorado” na seção Docker.
+
+11. Regras obrigatórias de consistência
+
+Todos os dados devem ser gerados a partir de uma fonte comum, garantindo consistência entre dashboard, tabela de servidores, gráficos, alertas e detalhes.
+
+CPU
+
+A CPU total deve corresponder à média da utilização dos oito núcleos lógicos.
+
+RAM
+
+A memória utilizada mais a memória disponível deve corresponder à memória total.
+
+Exemplo para pay-api-04:
+
+RAM total: 16 GB.
+RAM utilizada: 83%.
+RAM disponível: 2,72 GB.
+Disco
+
+O espaço utilizado mais o espaço livre deve corresponder à capacidade total.
+
+Exemplo para /dados do pay-api-04:
+
+Capacidade: 200 GB.
+Uso: 66%.
+Espaço livre: 68 GB.
+Processos e containers
+O consumo dos processos deve respeitar a capacidade do host.
+Os containers devem apresentar consumo superior ao do processo principal que contêm, quando esse consumo estiver representado no mesmo escopo de medição.
+Incidentes
+
+Cada incidente deve registrar:
+
+Horário de início.
+Horário de escalada, quando houver.
+Pico atingido.
+Horário de recuperação ou encerramento.
+
+Um incidente que atingiu o estado crítico não pode aparecer apenas como um incidente de atenção.
+
+Limites
+
+Os limites de atenção e criticidade devem vir da tabela componentes_perfil no banco de dados. Não devem ficar duplicados ou espalhados pela interface.
+
+Identificação
+
+Os servidores devem ser identificados pelo endereço MAC. Se o MAC recebido não for conhecido, a interface deve exibir “Dados insuficientes”, sem associar métricas ao servidor errado.
+
+12. Roteiro da demonstração
+
+A apresentação deve seguir esta ordem:
+
+Abrir a dashboard no filtro de 30 minutos e mostrar os dois servidores críticos.
+Alterar para 1 hora e demonstrar a escalada dos incidentes.
+Alterar para 6 horas e mostrar que a tarde estava tranquila antes do jantar.
+Alterar para 12 horas e comparar o almoço com o jantar.
+Alterar para 24 horas e mostrar a recorrência do jantar de domingo.
+Alterar para 7 dias e apresentar a história completa, incluindo a campanha de sexta-feira e a instabilidade de rede de sábado.
+Encerrar explicando a diferença entre risco observado na infraestrutura e falha comercial comprovada.
+13. Ressalva sobre o impacto comercial
+
+O volume de 3.200 pedidos por minuto é apenas um número contextual simulado. Não é uma métrica coletada pelo agente.
+
+CPU e RAM elevadas indicam pressão sobre os recursos da infraestrutura e risco de degradação do serviço. Entretanto, sem monitoramento das transações comerciais, esses indicadores não comprovam pagamentos rejeitados, pedidos perdidos ou falhas efetivas nas vendas.
+
+Mensagem final da demonstração: o CoreTrace evidencia a pressão sobre a infraestrutura, identifica os componentes em risco e permite acompanhar a evolução dos incidentes. A comprovação de impacto comercial exige métricas específicas de transações e pedidos.
+
+Resultado esperado: uma demonstração fictícia, consistente e reproduzível, com histórico de sete dias, dez servidores, seis alertas ativos no horário de referência e uma narrativa coerente em todas as telas do CoreTrace.

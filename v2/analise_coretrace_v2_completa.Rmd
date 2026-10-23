@@ -1,0 +1,961 @@
+---
+title: "CoreTrace - Análise exploratória v2"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+---
+
+
+```{r configuracao, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.width = 9, fig.height = 4.5,
+                      warning = TRUE, message = FALSE)
+options(scipen = 999)
+```
+
+## Objetivo
+
+Analisar o comportamento das métricas de infraestrutura em um cenário simulado de servidores que sustentam uma operação de delivery, avaliando sua contribuição para identificar situações de atenção e criticidade, acompanhar a evolução de incidentes e reconhecer tendências de capacidade.
+
+A análise busca fundamentar a seleção das métricas monitoradas pelo CoreTrace, incluindo a obrigatoriedade de determinadas métricas, e justificar os indicadores e gráficos propostos para a dashboard a partir das perguntas e decisões que devem apoiar.
+
+A análise também define critérios para verificar a consistência das informações apresentadas entre a visão geral, os alertas e os detalhes dos servidores.
+
+Como os dados são simulados, as conclusões se limitam ao cenário estudado. A análise avalia sinais de pressão e risco nos servidores. 
+Obs: A confirmação de consequências para pedidos e pagamentos depende de dados adicionais da aplicação acessados pela equipe do contratante.
+
+## Contexto do cenário
+
+O cenário simula o monitoramento da infraestrutura de uma operação de delivery ao longo de sete dias, entre 12 e 19 de outubro de 2026. O instante final de observação corresponde às 20h30 do dia 19, durante um episódio de aumento da utilização de recursos no período do jantar. O histórico previsto contém uma amostra por minuto para cada servidor.
+
+A infraestrutura simulada é composta por dez servidores, organizados em três perfis conforme a função dos serviços:
+
+- **Carrinho:** quatro servidores responsáveis pelos serviços de montagem e finalização de pedidos.
+- **Financeiro:** três servidores responsáveis pelos serviços de pagamentos e transações.
+- **Catálogo:** três servidores responsáveis por consultas e disponibilização de dados de produtos.
+
+Durante a semana simulada, alguns servidores apresentam aumento no uso de CPU e memória, enquanto outros registram erros e descartes de pacotes na rede. Parte desses episódios termina com o retorno das métricas aos níveis normais. Esse histórico permite comparar os períodos com e sem alertas, identificar problemas que se repetem e acompanhar como cada episódio começa, se agrava e se recupera.
+
+No instante final, o cenário prevê dois servidores críticos, dois em atenção e seis em estado normal, considerando os limites configurados. Os quatro servidores afetados concentram seis alertas ativos, pois um mesmo servidor pode apresentar condições de alerta em mais de um componente. Separadamente, um volume de armazenamento apresenta uma tendência de crescimento que permite explorar a previsão de capacidade, embora sua ocupação atual permaneça abaixo do limite de atenção.
+
+A demonstração utiliza o iFood como referência fictícia de contexto. Os servidores, os valores das métricas e os incidentes foram definidos para fins de simulação e não representam a infraestrutura ou a operação real da empresa.
+
+## Preparação
+
+```{r preparacao}
+# Horário final do cenário
+referencia = as.POSIXct(
+  "2026-10-19 20:30:00",
+  tz = "America/Sao_Paulo"
+)
+
+referencia
+```
+
+## Janela de observação
+
+O cenário cobre sete dias, com uma coleta por minuto.
+Incluímos o instante inicial e o final.
+
+```{r janela-observacao}
+# Uma semana em segundos
+duracao_semana = 7 * 24 * 60 * 60
+
+# Guardando o início da observação
+inicio = referencia - duracao_semana
+
+# Sequência dos horários em que terá uma coleta
+instantes = seq(
+  from = inicio,
+  to = referencia,
+  by = "1 min"
+)
+
+inicio
+tail(instantes, 1)
+length(instantes)
+```
+
+## Organização dos servidores
+
+Cada servidor pertence a um perfil que representa sua função na operação. Essa classificação permite analisar tanto máquinas individuais quanto grupos de serviços.
+
+```{r cadastro-servidores}
+servidores = data.frame(
+  servidor = c(
+    "cart-api-07",
+    "cart-api-12",
+    "cart-api-02",
+    "cart-api-09",
+    "pay-api-04",
+    "pay-api-06",
+    "pay-db-02",
+    "catalog-api-03",
+    "catalog-api-05",
+    "catalog-api-08"
+  ),
+  perfil = c(
+    rep("Carrinho", 4),
+    rep("Financeiro", 3),
+    rep("Catálogo", 3)
+  ),
+  stringsAsFactors = FALSE
+)
+
+knitr::kable(servidores)
+
+# Conferir a quantidade de servidores por perfil
+table(servidores$perfil)
+```
+
+## Estrutura das observações
+
+Na tabela principal, cada linha representa um servidor em um instante de captura. O perfil identifica a função desse servidor.
+
+Inicialmente, montamos apenas as combinações esperadas de servidor e horário. Os valores das métricas serão incorporados posteriormente.
+
+```{r estrutura-observacoes}
+# Cria todas as combinações possíveis de cada servidor com todos os horários previstos
+# 10 servidores e 10.081 instantes de captura = 100.810 linhas
+base = expand.grid(
+  servidor = servidores$servidor,
+  instante = instantes,
+  stringsAsFactors = FALSE
+)
+
+# Acrescentar a coluna de perfil correspondente a cada servidor com match
+base$perfil = servidores$perfil[
+  match(base$servidor, servidores$servidor)
+]
+
+# Organizar por servidor e horário
+base = base[order(base$servidor, base$instante), ]
+rownames(base) = NULL # Reinicia a numeração das linhas
+
+# Mostrar as primeiras seis linhas
+knitr::kable(head(base))
+
+# Quantidade de linhas
+nrow(base)
+
+# Quantas linhas existem por servidor
+table(base$servidor)
+```
+
+## Conferência da estrutura
+
+Antes de adicionar as métricas, verificamos a quantidade de
+combinações previstas, a ausência de registros duplicados e
+o preenchimento dos perfis corretamente.
+Se por algum motivo acontecer um erro na geração da tabela base, podemos interromper e corrigir antes de adicionar os valores de leitura para as linhas.
+
+```{r conferir-estrutura}
+# Quantidade esperada: servidores multiplicados pelos horários
+total_esperado = nrow(servidores) * length(instantes)
+
+# Comparar a quantidade criada na base com a esperada
+nrow(base) == total_esperado
+
+# Procurar repetições da mesma combinação de servidor e horário
+sum(duplicated(base[c("servidor", "instante")]))
+
+# Contar linhas que ficaram sem perfil
+sum(is.na(base$perfil))
+```
+
+## Definição das métricas
+
+O dicionário mostra as opções do catálogo de monitoramento.
+As métricas foram organizadas por recurso para explicar o que cada medida representa, sua unidade e o nível de detalhamento necessário pra análise.
+
+Distinguimos métricas de utilização, sinais que apoiam a investigação de pressão sobre os recursos e registros de ocorrências. 
+Uma medida isolada não determina a causa de um incidente. sua interpretação depende do histórico, das características do servidor e de outras métricas relacionadas.
+
+### CPU
+
+As métricas de CPU permitem observar a utilização do processamento e investigar diferenças entre CPUs lógicas e os tipos de atividade.
+
+| Métrica | Unidade | Finalidade |
+|---|---|---|
+| Uso total de CPU | % | Acompanhar a utilização do processamento do servidor |
+| Uso por CPU lógica | % por CPU lógica | Identificar concentração de utilização que a média total pode esconder |
+| CPU em modo usuário | % | Observar a parcela de tempo dedicada à execução em modo usuário |
+| CPU em modo sistema | % | Observar a parcela de tempo dedicada à execução em modo kernel |
+| CPU ociosa | % | Observar a parcela de tempo em que a CPU permanece ociosa |
+| Espera por I/O | % | Apoiar a investigação de espera associada a operações de entrada e saída |
+| Frequência da CPU | MHz | Acrescentar contexto sobre a frequência de operação |
+| Interrupções | eventos/s | Acompanhar a atividade de interrupções do sistema |
+| Trocas de contexto | eventos/s | Acompanhar a alternância de execução entre tarefas |
+
+O uso total e o uso por CPU lógica têm escopos diferentes.
+Nos processos e containers, a convenção de CPU também pode ser
+diferente: 100% pode representar uma CPU lógica, permitindo valores
+superiores a 100%.
+As comparações irão respeitar essa definição.
+
+### Carga do sistema
+
+A carga média ajuda a entender quanto trabalho está sendo executado ou aguardando atendimento no servidor. No Linux, considera tanto tarefas executando ou aguardando CPU quanto tarefas em determinados estados de espera, como operações de disco. Por isso, carga alta não significa necessariamente CPU muito utilizada. O servidor pode ter várias tarefas esperando pelo disco, por exemplo, enquanto a CPU ainda tem capacidade disponível. Essa métrica deve ser interpretada junto ao uso de CPU e às métricas de I/O.
+
+| Métrica | Unidade | Finalidade |
+|---|---|---|
+| Carga média de 1 minuto | carga | Observar mudanças mais recentes na demanda |
+| Carga média de 5 minutos | carga | Acompanhar a persistência da demanda |
+| Carga média de 15 minutos | carga | Comparar o comportamento recente com uma janela mais longa |
+
+A carga não é um percentual. Sua interpretação considera a
+quantidade de CPUs lógicas e os demais sinais do servidor.
+
+### Memória RAM
+
+As métricas de RAM permitem observar ocupação, capacidade e margem
+disponível, além de ocorrências de encerramento por falta de memória.
+
+| Métrica | Unidade | Finalidade |
+|---|---|---|
+| Uso de RAM | % | Acompanhar a ocupação em relação à capacidade |
+| Capacidade total de RAM | GB | Contextualizar os valores absolutos e percentuais |
+| Memória disponível | GB | Observar a estimativa de memória disponível para novas demandas |
+| Memória em uso | GB | Quantificar a memória em uso conforme a definição da fonte |
+| Memória livre | GB | Observar a memória não utilizada, distinguindo-a da disponível |
+| Memória em cache | GB | Acrescentar contexto sobre o uso de memória para cache |
+| Encerramentos por OOM | ocorrências no intervalo | Identificar novos encerramentos por falta de memória registrados pela fonte |
+
+Memória livre e memória disponível não são equivalentes.
+Não se deve assumir que memória em uso + memória disponível sempre corresponde à capacidade total.
+
+### Swap
+
+A análise de swap complementa a observação da RAM, distinguindo
+ocupação de movimentação de dados.
+
+| Métrica | Unidade | Finalidade |
+|---|---|---|
+| Uso de swap | % | Acompanhar a proporção ocupada |
+| Entrada de swap | bytes/s | Observar dados trazidos da swap para a RAM |
+| Saída de swap | bytes/s | Observar dados enviados da RAM para a swap |
+| Swap em uso | GB | Quantificar o espaço ocupado |
+| Swap livre | GB | Quantificar o espaço restante |
+
+A ocupação da swap pode permanecer após um período de maior demanda e, sozinha, não indica falta de RAM no momento. Pra investigar pressão de memória, analisamos também a memória disponível e a movimentação de dados entre RAM e swap ao longo do tempo. Quando não houver swap configurada, essa condição será informada explicitamente.
+
+### Capacidade e atividade de armazenamento
+
+A capacidade é analisada por volume. A atividade de I/O é analisada
+por dispositivo. Essas identificações não devem ser tratadas como
+equivalentes sem verificar sua relação.
+
+| Métrica | Unidade | Detalhamento | Finalidade |
+|---|---|---|---|
+| Ocupação do volume | % | Volume | Acompanhar o consumo da capacidade |
+| Espaço livre | GB | Volume | Quantificar a margem restante |
+| Espaço ocupado | GB | Volume | Quantificar o armazenamento utilizado |
+| Uso de inodes | % | Sistema de arquivos aplicável | Observar o consumo da capacidade de manter arquivos |
+| Tempo médio estimado de leitura e escrita | ms | Dispositivo e operação | Investigar o tempo médio das operações de I/O |
+| Fila média de I/O | operações | Dispositivo | Acompanhar operações pendentes e em andamento conforme a fonte |
+| Taxa de leitura | bytes/s | Dispositivo | Quantificar o volume de dados lidos por segundo |
+| Taxa de escrita | bytes/s | Dispositivo | Quantificar o volume de dados escritos por segundo |
+| Operações de leitura | IOPS | Dispositivo | Quantificar leituras por segundo |
+| Operações de escrita | IOPS | Dispositivo | Quantificar escritas por segundo |
+
+A capacidade total do volume também será registrada como informação de referência.
+
+Espaço disponível e desempenho de I/O respondem a perguntas diferentes: um volume pode ter espaço livre e apresentar operações lentas. 
+O tempo médio estimado de I/O não corresponde à latência de uma requisição da aplicação.
+
+### Rede
+
+As métricas de rede são identificadas por interface e, quando
+aplicável, pela direção de recebimento ou envio.
+
+| Métrica | Unidade | Finalidade |
+|---|---|---|
+| Dados recebidos e enviados | bytes/s | Acompanhar o tráfego em cada direção |
+| Erros de recebimento e envio | eventos/s | Localizar ocorrências de erro na comunicação |
+| Descartes na entrada e saída | pacotes/s | Acompanhar pacotes descartados |
+| Estado da interface | ativa/inativa | Identificar o estado operacional informado pela fonte |
+| Pacotes recebidos | pacotes/s | Acompanhar a quantidade de pacotes recebidos |
+| Pacotes enviados | pacotes/s | Acompanhar a quantidade de pacotes enviados |
+
+Tráfego em bytes/s não representa percentual de utilização sem
+uma capacidade de referência. Erros e descartes exigem investigação
+e não comprovam, isoladamente, perda de pedidos ou falha de pagamento.
+
+### Processos e containers
+
+O detalhamento dos consumidores permite relacionar os sinais do
+servidor aos processos e containers observados.
+
+| Objeto | Medidas e informações | Finalidade |
+|---|---|---|
+| Processo | PID, nome, estado, CPU e RAM | Identificar consumidores de recursos dentro do servidor |
+| Container | Identificação, estado, CPU, RAM e atividade de I/O | Investigar a distribuição do consumo entre containers |
+
+No cenário, o monitoramento Docker se aplica aos perfis Carrinho
+e Financeiro. No perfil Catálogo, a informação deve aparecer como
+“Não monitorado”.
+
+Processos e containers podem representar consumos sobrepostos:
+um processo pode estar dentro de um container. Seus valores não
+devem ser somados como se fossem consumidores independentes.
+
+### Indicadores calculados para a dashboard
+
+Os indicadores abaixo são derivados das métricas, do cadastro, dos limites configurados e das regras de classificação.
+
+| Indicador | Definição |
+|---|---|
+| Servidores em atenção | Quantidade de servidores cuja maior severidade atual é atenção |
+| Servidores críticos | Quantidade de servidores cuja maior severidade atual é crítica |
+| Alertas ativos | Quantidade de condições de alerta abertas por servidor e componente |
+| Evolução dos servidores em alerta | Contagem de servidores em atenção e críticos em cada instante |
+| Servidores com alertas por recurso | Contagem de servidores distintos afetados em cada recurso, conforme a referência temporal definida |
+| Previsão de capacidade | Prazo estimado até um limite de ocupação, considerando o histórico e a hipótese de crescimento adotada |
+
+A regra temporal do gráfico por recurso será explicitada na análise da visualização, distinguindo estado atual de ocorrências no período.
+
+### Critério para avaliar a obrigatoriedade
+
+Uma métrica será avaliada como essencial quando sua ausência
+comprometer uma pergunta ou uma função considerada necessária
+ao escopo do CoreTrace.
+
+A justificativa considerará sua contribuição para os indicadores, o contexto necessário à interpretação, a possibilidade de derivação a partir de outros campos e sua aplicabilidade ao ambiente.
+
+Coletar uma métrica, apresentá-la na dashboard e utilizá-la como condição de alerta são decisões distintas. A obrigatoriedade atual do catálogo será examinada posteriormente, sem presumir que todas as escolhas existentes já estejam demonstradas pelos dados.
+
+
+## Método e origem dos dados
+
+A análise combina o cenário narrativo fornecido pela equipe com uma base sintética reproduzível construída em R. Os valores finais e os episódios descritos no cenário são requisitos da demonstração. Oscilações, duração e horários de episódios não especificados foram escolhidos para completar a simulação e estão expostos no código.
+
+Não usamos números aleatórios: executar novamente o relatório produz os mesmos resultados. A aproximação linear cria os valores entre os pontos de referência. Os estados e incidentes são calculados depois, comparando cada valor com os limites. Os pontos do jantar foram calibrados para reproduzir os horários de transição previstos; encontrá-los novamente verifica a implementação da regra, não constitui evidência independente de comportamento real.
+
+A base cobre CPU total, RAM, ocupação de um volume por servidor e erros/descartes de uma interface. Ela permite analisar os indicadores gerais e os episódios narrados. Swap, I/O, processos e containers recebem exemplos complementares identificados como hipóteses de simulação; não são evidências experimentais da sua utilidade. A carga média é discutida conceitualmente, sem simulação numérica. O dicionário descreve o catálogo mais amplo, incluindo métricas não simuladas numericamente neste relatório.
+
+### Dimensões e unidade de observação
+
+| Tabela | Uma linha representa | Dimensões |
+|---|---|---|
+| Base histórica | Um servidor em um minuto | Servidor, perfil, instante; volume /dados e interface eth0 convencionados |
+| Condições atuais | Uma métrica de um servidor no instante final | Servidor, perfil, métrica, instante |
+| Incidentes | Um episódio contínuo fora do estado normal | Servidor, métrica, início, escalada, fim |
+| Processos e containers | Um consumidor no instante final | Servidor e identificação do consumidor |
+
+Outros volumes e interfaces exigem linhas ou tabelas próprias: não devem ser somados sem identificar seu escopo. No produto, o vínculo técnico é por MAC; os nomes são rótulos legíveis. A base inclui os MACs do cadastro SQL local, mas isso não testa a recepção do agente.
+
+```{r funcoes-e-limites}
+# Funções pequenas reutilizadas ao longo do relatório.
+hora = function(texto) as.POSIXct(texto, tz = "America/Sao_Paulo")
+
+# Construir uma curva por pontos de referência.
+curva = function(horarios, valores, destino) {
+  approx(as.numeric(hora(horarios)), valores,
+         xout = as.numeric(destino), rule = 2)$y
+}
+
+# Esta função utiliza >, conforme o SQL consultado.
+classificar = function(valor, atencao, critico) {
+  if (!all(is.finite(c(valor, atencao, critico)))) return("Dados insuficientes")
+  if (valor > critico) return("Crítico")
+  if (valor > atencao) return("Atenção")
+  return("Normal")
+}
+
+# Cópia de referência de componentes_perfil do SQL local.
+# Não é uma consulta ao banco em execução.
+limites = data.frame(
+  perfil = rep(c("Carrinho", "Financeiro", "Catálogo"), each = 5),
+  metrica = rep(c("cpu_percent", "ram_percent", "disk_percent",
+                  "net_errors", "net_drops"), 3),
+  operador = ">",
+  atencao = c(70,75,80,5,10, 75,75,80,5,10, 75,75,80,5,10),
+  critico = c(90,90,95,15,30, 92,90,95,15,30, 90,90,95,15,30)
+)
+knitr::kable(limites)
+
+servidores$mac = c(
+  "AA:BB:CC:DD:EE:07", "AA:BB:CC:DD:EE:12",
+  "AA:BB:CC:DD:EE:02", "AA:BB:CC:DD:EE:09",
+  "AA:BB:CC:DD:EF:04", "AA:BB:CC:DD:EF:06",
+  "AA:BB:CC:DD:EF:02", "AA:BB:CC:DD:F0:03",
+  "AA:BB:CC:DD:F0:05", "AA:BB:CC:DD:F0:08"
+)
+servidores$ram_total_gb = c(16,16,16,16,16,16,32,16,16,16)
+servidores$disco_total_gb = c(200,200,200,200,200,200,200,200,500,200)
+servidores$docker = servidores$perfil != "Catálogo"
+```
+
+Essencial não significa que cada campo deva gerar alerta. Nesta simulação, somente cinco métricas possuem regras de alerta. O operador `>` distingue igualdade de ultrapassagem: CPU de 92% no Financeiro ainda é atenção; acima de 92% é crítica.
+
+## Construção da semana simulada
+
+### Funcionamento habitual e episódios recuperados
+
+```{r gerar-base}
+# Valores habituais escolhidos para a simulação, abaixo dos limites.
+base$cpu_percent = 35 + 4 * sin(as.numeric(difftime(
+  base$instante, inicio, units = "hours")) / 3)
+base$ram_percent = 53 + 2 * sin(as.numeric(difftime(
+  base$instante, inicio, units = "hours")) / 5)
+base$disk_percent = 48
+base$net_errors = 0
+base$net_drops = 0
+
+# Picos históricos. Horários não especificados no texto são hipóteses.
+episodios = data.frame(
+  servidor = c("cart-api-02", "catalog-api-03", "cart-api-09",
+    "pay-api-06", "pay-db-02", "catalog-api-03", "pay-api-06",
+    "cart-api-02", "catalog-api-03", "catalog-api-03", "cart-api-12",
+    "cart-api-07", "pay-db-02", "catalog-api-03", "cart-api-02"),
+  metrica = c("ram_percent", "cpu_percent", "cpu_percent", "cpu_percent",
+    "ram_percent", "cpu_percent", "cpu_percent", "cpu_percent",
+    "net_errors", "net_drops", "cpu_percent", "cpu_percent",
+    "ram_percent", "cpu_percent", "ram_percent"),
+  inicio = c("2026-10-13 11:30", "2026-10-13 11:30", "2026-10-14 18:30",
+    "2026-10-14 18:30", "2026-10-15 11:30", "2026-10-15 11:30",
+    "2026-10-16 18:00", "2026-10-16 18:00", "2026-10-17 18:00",
+    "2026-10-17 18:00", "2026-10-17 18:00", "2026-10-18 18:30",
+    "2026-10-18 18:30", "2026-10-19 11:30", "2026-10-19 11:30"),
+  pico = c(82,84,84,86,84,84,96,84,9,16,82,86,82,84,82),
+  stringsAsFactors = FALSE
+)
+
+# Cada pico sobe por uma hora, permanece 30 min e se recupera em uma hora.
+# No domingo, o pico permanece 90 min para aparecer no recorte de 24 horas.
+for (i in seq_len(nrow(episodios))) {
+  e = episodios[i, ]
+  t0 = hora(paste0(e$inicio, ":00"))
+  t1 = t0 + 60 * 60
+  t2 = t1 + 30 * 60
+  if (format(t0, "%Y-%m-%d", tz="America/Sao_Paulo") == "2026-10-18") {
+    t2 = t1 + 90 * 60
+  }
+  t3 = t2 + 60 * 60
+  linhas = which(base$servidor == e$servidor &
+                   base$instante >= t0 & base$instante <= t3)
+  valor_inicial = base[linhas[1], e$metrica]
+  valor_final = base[tail(linhas, 1), e$metrica]
+  base[linhas, e$metrica] = approx(
+    as.numeric(c(t0,t1,t2,t3)),
+    c(valor_inicial,e$pico,e$pico,valor_final),
+    xout = as.numeric(base$instante[linhas]))$y
+}
+knitr::kable(episodios)
+```
+
+A duração dos episódios é uma hipótese da simulação. No domingo, o patamar de pico se estende por 90 minutos, permitindo observar parte desse episódio a partir das 20h30, quando começa a janela de 24 horas da demonstração.
+
+### Escalada do jantar de segunda-feira
+
+```{r jantar}
+# A trajetória começa tranquila às 14h30.
+# Cada cruzamento inclui um ponto no minuto anterior exatamente no limite.
+# A classificação será calculada a partir dos números, sem estados fixos.
+trajetoria_jantar = function(servidor, metrica, horarios, valores) {
+  linhas = which(base$servidor == servidor &
+                   base$instante >= hora("2026-10-19 14:30:00"))
+  base[linhas, metrica] <<- curva(
+    paste("2026-10-19", horarios), valores, base$instante[linhas])
+}
+
+trajetoria_jantar("cart-api-07", "cpu_percent",
+  c("14:30:00","18:30:00","18:59:00","19:00:00",
+    "20:04:00","20:05:00","20:30:00"),
+  c(35,60,70,70.2,90,90.2,94))
+trajetoria_jantar("pay-api-04", "cpu_percent",
+  c("14:30:00","19:09:00","19:10:00","19:49:00","19:50:00","20:30:00"),
+  c(35,75,75.2,92,92.2,95))
+trajetoria_jantar("cart-api-12", "cpu_percent",
+  c("14:30:00","18:29:00","18:30:00","20:30:00"), c(35,70,70.2,78))
+trajetoria_jantar("pay-db-02", "cpu_percent",
+  c("14:30:00","20:30:00"), c(35,65))
+trajetoria_jantar("pay-db-02", "ram_percent",
+  c("14:30:00","18:44:00","18:45:00","20:30:00"), c(53,75,75.2,79))
+trajetoria_jantar("cart-api-07", "ram_percent",
+  c("14:30:00","19:24:00","19:25:00","20:30:00"), c(53,75,75.2,81))
+trajetoria_jantar("pay-api-04", "ram_percent",
+  c("14:30:00","19:29:00","19:30:00","20:30:00"), c(53,75,75.2,83))
+trajetoria_jantar("cart-api-12", "ram_percent",
+  c("14:30:00","20:30:00"), c(53,63))
+
+# Tendência independente de capacidade: 1,5 ponto percentual por dia.
+linhas = which(base$servidor == "catalog-api-05")
+dias_ate_referencia = as.numeric(difftime(
+  base$instante[linhas], referencia, units = "days"))
+base$disk_percent[linhas] = 77 + 1.5 * dias_ate_referencia
+
+# /dados de pay-api-04 termina em 66%, conforme o exemplo do cenário.
+base$disk_percent[base$servidor == "pay-api-04"] = 66
+
+# Identificação e capacidade de cada host.
+posicao = match(base$servidor, servidores$servidor)
+base$mac = servidores$mac[posicao]
+base$ram_total_gb = servidores$ram_total_gb[posicao]
+base$disco_total_gb = servidores$disco_total_gb[posicao]
+base$ram_disponivel_gb = base$ram_total_gb * (1 - base$ram_percent/100)
+# Convenção do mock: utilizada = total menos disponível.
+# Não equivale necessariamente ao campo used do psutil.
+base$ram_utilizada_mock_gb = base$ram_total_gb - base$ram_disponivel_gb
+base$disco_usado_gb = base$disco_total_gb * base$disk_percent/100
+base$disco_livre_gb = base$disco_total_gb - base$disco_usado_gb
+base$oom = 0
+```
+
+O operador `<<-` atualiza a tabela `base` que está fora da função. Aqui ele é usado apenas nessa função curta de construção das trajetórias. As fórmulas são hipóteses controladas do mock, não modelos estimados de uma operação real.
+
+## Qualidade e classificação dos dados
+
+```{r qualidade}
+metricas = c("cpu_percent","ram_percent","disk_percent","net_errors","net_drops")
+verificacoes = data.frame(
+  verificacao = c("100.810 registros", "Sem duplicação servidor + instante",
+    "Sem métricas ausentes", "Percentuais entre 0 e 100",
+    "RAM consistente com a convenção do mock", "Disco usado + livre = total"),
+  passou = c(nrow(base) == 100810,
+    !any(duplicated(base[c("servidor","instante")])),
+    !anyNA(base[metricas]),
+    all(as.matrix(base[metricas[1:3]]) >= 0 & as.matrix(base[metricas[1:3]]) <= 100),
+    all(abs(base$ram_utilizada_mock_gb + base$ram_disponivel_gb - base$ram_total_gb) < 0.000001),
+    all(abs(base$disco_usado_gb + base$disco_livre_gb - base$disco_total_gb) < 0.000001))
+)
+knitr::kable(verificacoes)
+stopifnot(all(verificacoes$passou))
+
+# Verificar também contagem e espaçamento por servidor.
+for (nome in servidores$servidor) {
+  d = base[base$servidor == nome, ]
+  stopifnot(nrow(d) == 10081,
+            all(diff(as.numeric(d$instante)) == 60))
+}
+
+# Uma coluna de situação para cada métrica.
+for (m in metricas) {
+  coluna = paste0("estado_", m)
+  base[[coluna]] = NA_character_
+  for (perfil_atual in servidores$perfil[!duplicated(servidores$perfil)]) {
+    l = limites[limites$perfil == perfil_atual & limites$metrica == m, ]
+    linhas = which(base$perfil == perfil_atual)
+    # As faixas e os valores ausentes já foram conferidos acima.
+    base[linhas, coluna] = ifelse(base[linhas,m] > l$critico, "Crítico",
+      ifelse(base[linhas,m] > l$atencao, "Atenção", "Normal"))
+  }
+}
+ordem = c("Normal","Atenção","Crítico")
+base$gravidade = 1L
+for (m in metricas) {
+  base$gravidade = pmax(base$gravidade, match(base[[paste0("estado_",m)]], ordem))
+}
+base$situacao = ordem[base$gravidade]
+```
+
+Uma métrica ausente não deve virar zero. Um recurso não monitorado não deve virar normal. Para exemplificar essas diferenças, a função de classificação preserva “Dados insuficientes”. Nesta base completa e controlada, a conferência interrompe o relatório se houver lacunas; não simulamos falhas de coleta como se fossem funcionamento saudável.
+
+## Estado final e indicadores da dashboard
+
+```{r estado-atual}
+atual = base[base$instante == referencia, ]
+resumo_atual = atual[c("servidor","perfil","cpu_percent","ram_percent","situacao")]
+knitr::kable(resumo_atual, digits = 2)
+
+condicoes = data.frame()
+for (m in metricas) {
+  parte = data.frame(servidor = atual$servidor, perfil = atual$perfil,
+    metrica = m, valor = atual[[m]],
+    situacao = atual[[paste0("estado_",m)]])
+  condicoes = rbind(condicoes, parte)
+}
+alertas_ativos = condicoes[condicoes$situacao != "Normal", ]
+knitr::kable(alertas_ativos, digits = 2)
+
+# Comparar os seis pares exatos, não apenas a contagem total.
+pares_esperados = c("pay-api-04 cpu_percent", "pay-api-04 ram_percent",
+  "cart-api-07 cpu_percent", "cart-api-07 ram_percent",
+  "cart-api-12 cpu_percent", "pay-db-02 ram_percent")
+stopifnot(setequal(paste(alertas_ativos$servidor, alertas_ativos$metrica), pares_esperados))
+
+kpis = data.frame(
+  indicador = c("Servidores em atenção", "Servidores críticos",
+    "Servidores normais", "Alertas ativos", "Servidores afetados"),
+  valor = c(sum(atual$situacao == "Atenção"), sum(atual$situacao == "Crítico"),
+    sum(atual$situacao == "Normal"), nrow(alertas_ativos),
+    length(unique(alertas_ativos$servidor))))
+knitr::kable(kpis)
+stopifnot(identical(as.integer(kpis$valor), c(2L,2L,6L,6L,4L)))
+
+# Valores finais exigidos para os quatro servidores afetados.
+esperado = data.frame(servidor=c("pay-api-04","cart-api-07","cart-api-12","pay-db-02"),
+  cpu=c(95,94,78,65), ram=c(83,81,63,79))
+p = match(esperado$servidor, atual$servidor)
+stopifnot(all(abs(atual$cpu_percent[p]-esperado$cpu)<0.000001),
+          all(abs(atual$ram_percent[p]-esperado$ram)<0.000001))
+```
+
+No instante final, os quatro servidores afetados geram seis condições ativas. O estado do servidor usa a maior gravidade, evitando contar o mesmo host em atenção e crítico. A tela de alertas preserva as condições independentes. Os seis hosts restantes são normais somente para as regras e métricas observadas, não como garantia de saúde de toda a aplicação.
+
+### Gráfico 1 — servidores com alertas por recurso
+
+```{r grafico-recursos}
+recursos = c("CPU","RAM","Disco","Rede")
+contagem = matrix(0, nrow=2, ncol=4,
+  dimnames=list(c("Atenção","Crítico"), recursos))
+for (recurso in recursos) {
+  ms = switch(recurso, CPU="cpu_percent", RAM="ram_percent",
+               Disco="disk_percent", Rede=c("net_errors","net_drops"))
+  for (nome in atual$servidor) {
+    s = condicoes$situacao[condicoes$servidor == nome & condicoes$metrica %in% ms]
+    maior = max(match(s, ordem))
+    if (maior > 1) contagem[maior-1,recurso] = contagem[maior-1,recurso] + 1
+  }
+}
+barplot(contagem, col=c("#B77900","#C62828"), ylim=c(0,4),
+  main="Servidores com alertas por recurso — estado atual",
+  ylab="Servidores distintos por recurso", xlab="Recurso",
+  legend.text=rownames(contagem), args.legend=list(x="topright",bty="n"))
+knitr::kable(contagem)
+```
+
+CPU e RAM têm três servidores afetados cada, mas a CPU concentra os dois casos críticos. O empilhamento preserva essa diferença. Barras facilitam a comparação de categorias; uma pizza sugeriria partes exclusivas de um total, embora um servidor possa aparecer em CPU e RAM. As barras não devem ser somadas para obter servidores únicos. Erros e descartes da mesma interface são agregados em Rede pela maior gravidade, sem duplicar o host.
+
+A regra adotada para este gráfico é **estado atual**. O filtro temporal modifica a evolução e a lista histórica de incidentes; não modifica essas barras nem os cards. Se o produto oferecer barras históricas, o modo deve ter outro rótulo: servidores únicos afetados no período pela maior gravidade. As duas contagens respondem a perguntas diferentes.
+
+## Evolução dos servidores em alerta
+
+```{r evolucao}
+evolucao = data.frame(instante=instantes, atencao=0L, critico=0L)
+for (nome in servidores$servidor) {
+  s = base$situacao[base$servidor == nome]
+  evolucao$atencao = evolucao$atencao + as.integer(s == "Atenção")
+  evolucao$critico = evolucao$critico + as.integer(s == "Crítico")
+}
+
+# Os seis filtros recortam a mesma base, sem recalcular os valores atuais.
+periodos = c("30 minutos"=30, "1 hora"=60, "6 horas"=360,
+             "12 horas"=720, "24 horas"=1440, "7 dias"=10080)
+
+# Confirmar que a janela de 24 horas inclui o episódio de domingo.
+domingo_24h = base[base$instante >= referencia-1440*60 &
+  base$instante < hora("2026-10-19 00:00:00"), ]
+stopifnot(all(c("cart-api-07", "pay-db-02") %in%
+  domingo_24h$servidor[domingo_24h$situacao == "Atenção"]))
+
+for (rotulo in names(periodos)) {
+  d = evolucao[evolucao$instante >= referencia-periodos[rotulo]*60, ]
+  plot(d$instante, d$atencao, type="s", col="#B77900", lwd=2,
+    ylim=c(0,10), xlab="Horário de Brasília", ylab="Servidores distintos",
+    main=paste("Evolução —",rotulo))
+  lines(d$instante,d$critico,type="s",col="#C62828",lwd=2,lty=2)
+  legend("topleft",c("Atenção","Crítico"),col=c("#B77900","#C62828"),
+    lty=c(1,2),lwd=2,bty="n")
+}
+```
+
+A linha em degraus representa contagens discretas: a mudança ocorre no registro em que o host muda de estado. Uma linha de médias esconderia a duração das condições. As duas séries têm contagens exclusivas; quando um servidor escala, ele sai de atenção e entra em crítico. Por isso, atenção pode cair enquanto o risco aumenta.
+
+| Período | Pergunta apoiada |
+|---|---|
+| 30 minutos | Como ocorreu a escalada crítica final? |
+| 1 hora | Quais mudanças antecederam o estado atual? |
+| 6 horas | Como o jantar se diferencia da tarde? |
+| 12 horas | Como almoço e jantar se comparam? |
+| 24 horas | O episódio do jantar também ocorreu no domingo? |
+| 7 dias | Quais episódios se repetem e quais são diferentes? |
+
+São recortes sobre uma história definida, não amostras independentes. Sete dias permitem descrever a recorrência construída, mas não comprovar sazonalidade real. A frequência de um minuto também não garante detectar eventos menores que um minuto. Uma visão operacional precisa informar a última coleta e tratar dados desatualizados separadamente.
+
+## Incidentes: início, escalada, pico e recuperação
+
+Um incidente é tratado aqui como um episódio contínuo de uma métrica fora do normal. A mudança de atenção para crítico pertence ao mesmo episódio. A recuperação é o primeiro registro novamente normal, e a severidade histórica preserva o maior nível atingido.
+
+```{r incidentes}
+incidentes = data.frame()
+for (nome in servidores$servidor) {
+  d = base[base$servidor == nome, ]
+  for (m in metricas) {
+    estados = d[[paste0("estado_",m)]]
+    ativo = estados != "Normal"
+    anteriores = c(FALSE, head(ativo,-1))
+    seguintes = c(tail(ativo,-1),FALSE)
+    comecos = which(ativo & !anteriores)
+    finais = which(ativo & !seguintes)
+    if (length(comecos) == 0) next
+    for (j in seq_along(comecos)) {
+      a = comecos[j]; b = finais[j]
+      criticos = which(estados[a:b] == "Crítico")
+      escalada = as.POSIXct(NA, tz="America/Sao_Paulo")
+      if (length(criticos)>0) escalada = d$instante[a+criticos[1]-1]
+      fim = as.POSIXct(NA, tz="America/Sao_Paulo")
+      if (b < nrow(d)) fim = d$instante[b+1]
+      evento = data.frame(servidor=nome, metrica=m,
+        inicio=d$instante[a], escalada=escalada,
+        pico=max(d[a:b,m]), fim=fim,
+        severidade=ifelse(length(criticos)>0,"Crítico","Atenção"))
+      incidentes = rbind(incidentes,evento)
+    }
+  }
+}
+incidentes = incidentes[order(incidentes$inicio), ]
+knitr::kable(incidentes, digits=2)
+
+# Conferir as transições críticas previstas do jantar.
+jantar = incidentes[incidentes$inicio >= hora("2026-10-19 14:30:00"), ]
+knitr::kable(jantar, digits=2)
+stopifnot(nrow(jantar)==6, all(is.na(jantar$fim)))
+stopifnot(jantar$escalada[jantar$servidor=="pay-api-04" &
+  jantar$metrica=="cpu_percent"] == hora("2026-10-19 19:50:00"))
+stopifnot(jantar$escalada[jantar$servidor=="cart-api-07" &
+  jantar$metrica=="cpu_percent"] == hora("2026-10-19 20:05:00"))
+
+# Recortar episódios que se sobrepõem ao período, mesmo se começaram antes dele.
+incidentes_30m = incidentes[
+  incidentes$inicio <= referencia &
+  (is.na(incidentes$fim) | incidentes$fim > referencia-30*60), ]
+knitr::kable(incidentes_30m, digits=2)
+```
+
+Um início anterior ao começo do filtro não exclui um episódio que continuava ativo. Os campos sem fim representam incidentes abertos às 20h30. A regra desta demonstração não usa duração mínima nem histerese. Em produção, precisamos avaliar essas regras para evitar abertura e encerramento repetidos em torno do mesmo limite.
+
+### Distribuição e persistência
+
+```{r descritiva}
+resumo = data.frame()
+for (nome in servidores$servidor) {
+  d = base[base$servidor == nome, ]
+  resumo = rbind(resumo,data.frame(servidor=nome,
+    cpu_media=mean(d$cpu_percent), cpu_mediana=median(d$cpu_percent),
+    cpu_p95=as.numeric(quantile(d$cpu_percent,0.95)), cpu_max=max(d$cpu_percent),
+    ram_max=max(d$ram_percent),
+    amostras_atencao=sum(d$situacao=="Atenção"),
+    amostras_criticas=sum(d$situacao=="Crítico")))
+}
+knitr::kable(resumo, digits=2)
+boxplot(cpu_percent ~ perfil, data=base, col="#C9DCE8",
+  main="Distribuição da CPU ao longo da semana simulada",
+  xlab="Perfil", ylab="CPU total (%)")
+```
+
+Média e mediana resumem o comportamento, mas podem esconder episódios curtos. O máximo mostra o extremo; o percentil 95 é o valor abaixo do qual ficam aproximadamente 95% das amostras. Nenhum deles substitui a série temporal. Os valores extremos foram introduzidos intencionalmente e não devem ser removidos como erros apenas por aparecerem isolados no boxplot.
+
+As contagens representam amostras classificadas, não duração exata. Entre dois registros não há observação contínua. Também não tratamos cada minuto de uma curva determinística como experimento independente nem usamos testes de significância para alegar diferenças reais entre perfis.
+
+## Investigação técnica dos recursos
+
+### CPU total, CPU lógica e memória
+
+```{r detalhes-cpu-ram}
+for (nome in c("pay-api-04","cart-api-07","cart-api-12")) {
+  d = base[base$servidor==nome & base$instante>=referencia-360*60, ]
+  l = limites[limites$perfil==d$perfil[1] & limites$metrica=="cpu_percent", ]
+  plot(d$instante,d$cpu_percent,type="l",lwd=2,col="#C62828",ylim=c(0,100),
+    main=paste(nome,"— CPU e RAM em 6 horas"),xlab="Horário de Brasília",ylab="%")
+  lines(d$instante,d$ram_percent,col="#236A9B",lwd=2)
+  abline(h=c(l$atencao,l$critico),lty=c(2,3),col=c("#B77900","#C62828"))
+  legend("topleft",c("CPU","RAM","Atenção CPU","Crítico CPU"),
+    col=c("#C62828","#236A9B","#B77900","#C62828"),lty=c(1,1,2,3),bty="n")
+}
+
+# Exemplo de oito CPUs lógicas, com desvios que somam zero.
+# Uma hipótese ilustrativa; não prova que núcleos reais se comportem assim.
+cpu_host = atual$cpu_percent[atual$servidor=="pay-api-04"]
+desvios = c(-3,-2,-1,0,0,1,2,3)
+nucleos = cpu_host + desvios
+stopifnot(all(nucleos>=0 & nucleos<=100), abs(mean(nucleos)-cpu_host)<0.000001)
+barplot(nucleos,names.arg=paste0("CPU ",0:7),ylim=c(0,100),col="#236A9B",
+  main="pay-api-04 — exemplo de CPU por núcleo às 20h30",ylab="%")
+abline(h=cpu_host,col="#C62828",lty=2)
+
+knitr::kable(atual[c("servidor","ram_total_gb","ram_percent",
+  "ram_disponivel_gb","ram_utilizada_mock_gb")],digits=2)
+```
+
+A CPU total resume o host, mas pode ocultar concentração em uma CPU lógica. O detalhamento por núcleo permite investigar esse caso; o exemplo acima apenas verifica a consistência aritmética. No incidente final, CPU e RAM crescem juntas porque essa trajetória foi definida na simulação. Uma correlação alta não comprovaria que CPU causa pressão de memória ou que aumento de pedidos causou o incidente.
+
+### Swap e I/O: exemplos complementares
+
+```{r sinais-complementares}
+d = base[base$servidor=="pay-api-04" & base$instante>=referencia-360*60, ]
+# Hipóteses ilustrativas, não relações empíricas ou fórmulas de coleta.
+d$swap_saida_bytes_s = pmax(0,d$ram_percent-78)*2000
+d$fila_io = 0.2 + pmax(0,d$ram_percent-75)/10
+
+par(mfrow=c(1,2))
+plot(d$instante,d$swap_saida_bytes_s,type="l",main="Saída de swap simulada",xlab="Horário",ylab="bytes/s")
+plot(d$instante,d$fila_io,type="l",main="Fila de I/O simulada",xlab="Horário",ylab="Operações")
+par(mfrow=c(1,1))
+```
+
+Os dois painéis usam hipóteses ilustrativas para representar saída de swap e fila de I/O. As fórmulas não validam relações reais entre RAM, swap e I/O. A carga média de 5 e 15 minutos permanece no dicionário e na discussão conceitual, mas não foi simulada numericamente neste estudo.
+
+Na investigação real, a carga inclui tarefas executáveis e em espera ininterruptível; swap ocupada não comprova pressão atual; a fila de I/O inclui operações em andamento conforme a fonte. Tempos estimados de leitura/escrita, taxas e IOPS devem complementar a fila em dados reais. Nenhum desses sinais substitui latência e erros da aplicação.
+
+### Rede no sábado
+
+```{r rede-sabado}
+d = base[base$servidor=="catalog-api-03" &
+  base$instante>=hora("2026-10-17 17:00:00") &
+  base$instante<=hora("2026-10-17 22:00:00"), ]
+par(mfrow=c(1,2))
+plot(d$instante,d$net_errors,type="l",col="#C62828",lwd=2,
+  main="Erros — catalog-api-03",xlab="Horário",ylab="eventos/s")
+plot(d$instante,d$net_drops,type="l",col="#236A9B",lwd=2,
+  main="Descartes — catalog-api-03",xlab="Horário",ylab="pacotes/s")
+par(mfrow=c(1,1))
+stopifnot(max(d$net_errors)==9, max(d$net_drops)==16)
+```
+
+O episódio recuperado mostra por que observar apenas a coleta final omite ocorrências relevantes. Erros e descartes são sinais distintos, com unidades próprias. Mantivemos painéis separados para evitar uma comparação enganosa de grandezas diferentes. Eles não representam percentuais de rede nem quantidade de pedidos perdidos.
+
+### Processos e Docker
+
+```{r consumidores}
+# Fotografia sintética de três consumidores por servidor.
+# 100% de CPU equivale a uma CPU lógica; cada host tem capacidade de 800%.
+processos = data.frame()
+containers = data.frame()
+for (i in seq_len(nrow(atual))) {
+  host = atual[i, ]
+  cpu = host$cpu_percent*8
+  ram = host$ram_utilizada_mock_gb
+  processos = rbind(processos,data.frame(servidor=host$servidor,
+    processo=c("aplicacao","worker","agente"), pid=c(1800,2200,900)+i,
+    cpu=cpu*c(0.60,0.15,0.01), ram_gb=ram*c(0.55,0.12,0.01)))
+  if (host$perfil != "Catálogo") {
+    containers = rbind(containers,data.frame(servidor=host$servidor,
+      container=c("app","worker","agent"),estado="Executando",
+      cpu=cpu*c(0.65,0.18,0.02),ram_gb=ram*c(0.60,0.15,0.02)))
+  }
+}
+knitr::kable(processos[processos$servidor=="pay-api-04", ],digits=2)
+knitr::kable(containers[containers$servidor=="pay-api-04", ],digits=2)
+knitr::kable(servidores[c("servidor","perfil","docker")])
+
+# Cada container contém o processo de mesma posição neste exemplo.
+for (nome in servidores$servidor) {
+  p = processos[processos$servidor==nome, ]
+  a = atual[atual$servidor==nome, ]
+  stopifnot(sum(p$cpu)<=a$cpu_percent*8, sum(p$ram_gb)<=a$ram_utilizada_mock_gb)
+  c = containers[containers$servidor==nome, ]
+  if (nrow(c)>0) {
+    stopifnot(nrow(c)==3, all(c$cpu>=p$cpu), all(c$ram_gb>=p$ram_gb),
+      sum(c$cpu)<=a$cpu_percent*8, sum(c$ram_gb)<=a$ram_utilizada_mock_gb)
+  }
+}
+stopifnot(nrow(containers)==21)
+```
+
+No exemplo, o container inclui seu processo principal e outros consumos; por isso seu valor é maior. Somar processos com containers duplicaria parte do consumo. Catálogo permanece não monitorado para Docker. Um container em execução não comprova que a aplicação responda corretamente. Este exemplo não testa coleta Docker, limites de cgroups nem série temporal dos consumidores.
+
+## Previsão de capacidade
+
+```{r capacidade}
+d = base[base$servidor=="catalog-api-05", ]
+d$dias = as.numeric(difftime(d$instante,inicio,units="days"))
+# Ajustar uma reta ao histórico: ocupação = intercepto + crescimento * dias.
+modelo = lm(disk_percent ~ dias, data=d)
+crescimento = as.numeric(coef(modelo)["dias"])
+uso_atual = tail(d$disk_percent,1)
+l = limites[limites$perfil=="Catálogo" & limites$metrica=="disk_percent", ]
+prazo = NA_real_
+if (crescimento>0 && uso_atual<l$critico) prazo = (l$critico-uso_atual)/crescimento
+previsao = data.frame(servidor="catalog-api-05",volume="/dados",capacidade_gb=500,
+  ocupacao_percent=uso_atual,crescimento_pp_dia=crescimento,
+  limite_critico=l$critico,dias_ate_limite=prazo)
+knitr::kable(previsao,digits=2)
+stopifnot(abs(crescimento-1.5)<0.000001, abs(prazo-12)<0.000001,
+          uso_atual<l$atencao)
+
+plot(d$instante,d$disk_percent,type="l",lwd=2,col="#236A9B",
+  xlim=c(inicio,referencia+13*86400),ylim=c(60,100),
+  main="catalog-api-05 /dados — histórico e projeção",
+  xlab="Data",ylab="Ocupação (%)")
+lines(c(referencia,referencia+prazo*86400),c(uso_atual,l$critico),
+  lty=2,lwd=2,col="#236A9B")
+abline(h=c(l$atencao,l$critico),col=c("#B77900","#C62828"),lty=3)
+legend("topleft",c("Histórico simulado","Projeção","Atenção","Crítico"),
+  col=c("#236A9B","#236A9B","#B77900","#C62828"),lty=c(1,2,3,3),bty="n")
+```
+
+A previsão é (95 − 77) / 1,5 = 12 dias até atingir o limite de 95%. Com operador `>`, a criticidade exige ultrapassar esse valor. O crescimento é de 1,5 **ponto percentual** por dia, equivalente a 7,5 GB/dia para 500 GB. A previsão não é um alerta ativo: a ocupação atual está abaixo de 80%.
+
+A reta recupera a inclinação definida no gerador; seu ajuste perfeito não demonstra precisão preditiva em produção. Limpeza, retenção, expansão e mudança da demanda podem invalidar a projeção. Em dados reais, seria necessário avaliar a janela de ajuste e os erros de previsão. Sem tendência positiva ou dados suficientes, o produto deve informar ausência de previsão em vez de apresentar um prazo sem sustentação.
+
+## Justificativa das métricas essenciais
+
+A metodologia USE orienta perguntas sobre utilização, saturação e erros por recurso. O CoreTrace faz uma aplicação parcial: vários sinais apoiam investigação, mas não medem diretamente todos esses aspectos. A obrigatoriedade é uma política do produto, não uma exigência universal da metodologia.
+
+| Grupo essencial do catálogo | Pergunta ou dependência | Justificativa e limite |
+|---|---|---|
+| CPU total e por CPU lógica | Qual a utilização e onde se concentra? | Total sustenta a regra geral; núcleos evitam esconder concentração. Não provam causa ou lentidão |
+| RAM percentual, disponível e total | Qual a ocupação e a margem absoluta? | Percentual permite comparação relativa; GB contextualizam capacidade. Percentual pode ser derivado de total/disponível conforme a definição adotada |
+| OOM | Houve encerramentos por falta de memória? | Acrescenta uma ocorrência que a ocupação instantânea pode perder. Exige contador por intervalo e tratamento de reinício |
+| Disco percentual e livre | Quanto está ocupado e quanto resta? | Sustentam capacidade e planejamento. Redundância de cálculo exige consistência; não significa necessidade de medir ambos independentemente |
+| Inodes | Há capacidade para criar arquivos? | Pode faltar inode com bytes livres. Essencial somente onde aplicável; não foi exercitado numericamente no cenário |
+| Tempo estimado e fila de I/O | Há atividade acompanhada de espera? | Complementam ocupação. Obrigatoriedade tem justificativa diagnóstica, mas não foi validada pelos exemplos artificiais |
+| Swap percentual, entrada e saída | Há ocupação e movimentação de swap? | Juntas evitam confundir ocupação antiga com pressão atual. Ausência de swap deve ser declarada |
+| Carga de 5 e 15 minutos | A demanda persiste? | Complementa CPU e I/O. A necessidade das duas janelas como obrigatórias ainda requer avaliação; não é comprovada pelo mock |
+| Rede: tráfego, erros, descartes e estado | A interface está ativa e apresenta ocorrências? | Cobrem perguntas diferentes por interface. Não medem disponibilidade fim a fim ou latência da aplicação |
+
+CPU e RAM demonstram participação direta na classificação; disco demonstra o cálculo de capacidade; erros e descartes demonstram um episódio recuperado. Para os demais essenciais, a defesa é conceitual e de cobertura de perguntas, não uma conclusão experimental desta base. O catálogo deve admitir não aplicabilidade e pode ser revisto. Modos de CPU, taxas/IOPS e carga de 1 minuto acrescentam contexto recomendado; frequência, interrupções, trocas de contexto e outros complementos dependem da pergunta de investigação.
+
+## Como os elementos propostos da dashboard apoiam as decisões do usuário
+
+| Elemento | Pergunta | Decisão apoiada | Limitação |
+|---|---|---|---|
+| Servidores em atenção | Quais hosts já exigem avaliação? | Antecipar investigação | Não é previsão de falha |
+| Servidores críticos | Quais hosts ultrapassaram os limites críticos? | Priorizar investigação | Limite não mede impacto comercial |
+| Alertas ativos | Quantas condições estão abertas? | Examinar componentes de cada host | Não equivale a servidores nem a tickets |
+| Previsão de capacidade | Em quanto tempo o volume alcançaria o limite? | Avaliar limpeza ou expansão | Depende da hipótese de crescimento |
+| Evolução temporal | Como os estados mudaram? | Investigar início, persistência e recuperação | Resolução de um minuto perde eventos menores |
+| Barras por recurso | Onde se concentram condições atuais? | Direcionar a investigação | Host pode aparecer em mais de um recurso |
+| Detalhes e consumidores | Quais sinais e consumidores acompanham o alerta? | Formular e verificar hipóteses | Correlação não determina causa |
+
+O nicho está no uso operacional dessas informações: distinguir serviços que sustentam carrinho, pagamentos e catálogo e comparar episódios de almoço, jantar e campanha. O cenário assume essa relação funcional; os dados não provam que todos os serviços de delivery tenham o mesmo padrão ou prioridade. Não adotamos a preferência automática por um perfil: criticidade técnica, redundância e impacto observado devem orientar a operação real.
+
+CPU, RAM, armazenamento e rede oferecem cobertura inicial de recursos de infraestrutura. Carga, swap, I/O e consumidores aprofundam a investigação. Esse conjunto é suficiente para representar e fazer a triagem **dos episódios especificados**, mas não foi demonstrado como suficiente para todos os problemas do negócio. Para ampliar a cobertura seriam necessários, conforme o caso, latência, taxa de erros, transações, consultas de banco, filas da aplicação, disponibilidade externa e dados das dependências de pagamento.
+
+## Critérios de validação da dashboard
+
+Os cálculos deste relatório são uma referência independente de apresentação, mas a base e as regras são simuladas. Aprovação no relatório não significa aprovação automática da implementação web. A validação deve usar a mesma versão dos dados e limites nas duas ferramentas.
+
+| Conferência | Resultado esperado |
+|---|---|
+| Instante e volume de dados | 19/10/2026 20h30; dez hosts; 10.081 instantes por host |
+| Cards atuais | 2 em atenção, 2 críticos, 6 alertas ativos |
+| Pares de alerta | Os seis pares listados na tabela de alertas deste relatório |
+| Estado dos demais hosts | Seis normais para as regras observadas |
+| Filtros de tempo | Mesma base recortada; cards e barras atuais permanecem fixos |
+| Escalada | pay-api-04 CPU crítica às 19h50; cart-api-07 às 20h05 |
+| Incidentes recuperados | Encerramento registrado e maior severidade preservada |
+| Previsão | catalog-api-05 /dados, 500 GB, 77%, aproximadamente 12 dias até 95% |
+| Docker | Três containers por host de Carrinho/Financeiro; Catálogo não monitorado |
+| Identidade e qualidade | MAC desconhecido ou coleta inválida não recebem dados de outro host nem estado normal inventado |
+
+No gráfico por recurso aqui adotado, Rede tem uma contagem de hosts, embora duas métricas possam gerar alertas separados. Essa diferença deve ser mantida entre legenda, tooltip, card e lista. Cadastros autorizados, comunicação recente, dados desatualizados e permissões exigem verificação própria da aplicação e não foram certificados pelo gerador.
+
+## Conclusão
+
+A base sintética reproduz os resultados previstos do instante final e permite acompanhar episódios de crescimento, escalada e recuperação ao longo da semana. A separação entre estado do servidor e condição de componente produz quatro servidores afetados e seis alertas ativos. A evolução temporal acrescenta informações que os cards atuais não mostram; a separação por recurso e gravidade orienta a investigação.
+
+A capacidade de armazenamento exige tratamento próprio: o volume pode apresentar uma tendência de aproximação do limite sem ter um alerta ativo. Já os exemplos de consumidores e sinais complementares ilustram possibilidades de investigação e consistência, sem demonstrar relações causais ou desempenho real.
+
+As escolhas da dashboard estão fundamentadas nas perguntas operacionais do cenário e nos limites de interpretação de cada informação. A validação empírica das recomendações, das obrigatoriedades mais específicas e dos limites exige coletas reais e avaliação com usuários. O relatório oferece critérios para validar a dashboard, mas sua conformidade deve ser conferida em execução após alinhar os dados da aplicação.
+
+## Referências e rastreabilidade
+
+- Cenário narrativo fornecido pela equipe: `cenario-fornecido.txt`.
+- Catálogo e limites consultados: `website/src/database/script.sql`, cópia local do projeto. Mudanças futuras exigem atualização desta referência.
+- [Brendan Gregg — The USE Method](https://www.brendangregg.com/usemethod.html): orientação de investigação por utilização, saturação e erros; não define as obrigatoriedades do produto.
+- [psutil — documentação de memória](https://psutil.readthedocs.io/stable/#psutil.virtual_memory): definições de memória e limites de comparação entre campos.
+
+## Exportação dos resultados
+
+```{r exportacao}
+dir.create("dados-v2", showWarnings=FALSE)
+write.csv(base,"dados-v2/historico_simulado.csv",row.names=FALSE)
+write.csv(limites,"dados-v2/limites_referencia.csv",row.names=FALSE)
+write.csv(incidentes,"dados-v2/incidentes.csv",row.names=FALSE,na="")
+write.csv(alertas_ativos,"dados-v2/alertas_ativos.csv",row.names=FALSE)
+```
+
+Os arquivos exportados registram a versão construída neste relatório. Eles não atualizam automaticamente a dashboard nem representam uma exportação da aplicação web.
