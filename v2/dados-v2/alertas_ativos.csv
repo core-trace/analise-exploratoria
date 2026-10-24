@@ -1,7 +1,0 @@
-"servidor","perfil","metrica","valor","situacao"
-"cart-api-07","Carrinho","cpu_percent",94,"Crítico"
-"cart-api-12","Carrinho","cpu_percent",78,"Atenção"
-"pay-api-04","Financeiro","cpu_percent",95,"Crítico"
-"cart-api-07","Carrinho","ram_percent",81,"Atenção"
-"pay-api-04","Financeiro","ram_percent",83,"Atenção"
-"pay-db-02","Financeiro","ram_percent",79,"Atenção"

@@ -1,0 +1,25 @@
+"periodo","perfil","servidores_atencao","servidores_criticos","episodios_atencao","episodios_criticos","alertas_no_periodo"
+"30 minutos","Todos",2,2,4,2,6
+"1 hora","Todos",2,2,4,2,6
+"6 horas","Todos",2,2,4,2,6
+"12 horas","Todos",4,2,6,2,8
+"24 horas","Todos",4,2,8,2,10
+"7 dias","Todos",5,3,18,3,21
+"30 minutos","Carrinho",1,1,2,1,3
+"1 hora","Carrinho",1,1,2,1,3
+"6 horas","Carrinho",1,1,2,1,3
+"12 horas","Carrinho",2,1,3,1,4
+"24 horas","Carrinho",2,1,4,1,5
+"7 dias","Carrinho",3,1,8,1,9
+"30 minutos","Financeiro",1,1,2,1,3
+"1 hora","Financeiro",1,1,2,1,3
+"6 horas","Financeiro",1,1,2,1,3
+"12 horas","Financeiro",1,1,2,1,3
+"24 horas","Financeiro",1,1,3,1,4
+"7 dias","Financeiro",1,2,5,2,7
+"30 minutos","Catálogo",0,0,0,0,0
+"1 hora","Catálogo",0,0,0,0,0
+"6 horas","Catálogo",0,0,0,0,0
+"12 horas","Catálogo",1,0,1,0,1
+"24 horas","Catálogo",1,0,1,0,1
+"7 dias","Catálogo",1,0,5,0,5

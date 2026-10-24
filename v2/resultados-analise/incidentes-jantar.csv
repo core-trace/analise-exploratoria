@@ -1,0 +1,7 @@
+"mac","servidor","perfil","metrica","inicio","escalada","pico","fim","severidade"
+"AA:BB:CC:DD:EE:12","cart-api-12","Carrinho","cpu_percent",2026-10-19 18:29:00,,78,,"Atenção"
+"AA:BB:CC:DD:EF:02","pay-db-02","Financeiro","ram_percent",2026-10-19 18:44:00,,79,,"Atenção"
+"AA:BB:CC:DD:EE:07","cart-api-07","Carrinho","cpu_percent",2026-10-19 18:56:00,2026-10-19 20:03:00,94,,"Crítico"
+"AA:BB:CC:DD:EF:04","pay-api-04","Financeiro","cpu_percent",2026-10-19 19:07:00,2026-10-19 19:49:00,95,,"Crítico"
+"AA:BB:CC:DD:EE:07","cart-api-07","Carrinho","ram_percent",2026-10-19 19:24:00,,81,,"Atenção"
+"AA:BB:CC:DD:EF:04","pay-api-04","Financeiro","ram_percent",2026-10-19 19:29:00,,83,,"Atenção"

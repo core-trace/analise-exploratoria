@@ -1,0 +1,11 @@
+"servidor","perfil","volume","periodo_calculo","ocupacao_percent","crescimento_pp_dia","limite_critico","dias"
+"cart-api-07","Carrinho","/dados","7 dias",58,0.04,95,
+"cart-api-12","Carrinho","/dados","7 dias",53,0.04,95,
+"cart-api-02","Carrinho","/dados","7 dias",54,0.04,95,
+"cart-api-09","Carrinho","/dados","7 dias",52,0.04,95,
+"pay-db-02","Financeiro","/dados","7 dias",71,0.04,95,
+"pay-api-04","Financeiro","/dados","7 dias",66,0.04,95,
+"pay-api-06","Financeiro","/dados","7 dias",64,0.04,95,
+"catalog-api-03","Catálogo","/dados","7 dias",63,0.04,95,
+"catalog-api-05","Catálogo","/dados","7 dias",77,1.5,95,12
+"catalog-api-08","Catálogo","/dados","7 dias",49,0.04,95,
